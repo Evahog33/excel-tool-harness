@@ -4,6 +4,7 @@
   "type": "module",
   "main": "src/index.ts",
   "dependencies": {
-    "cordis": "^3.18.1"
+    "cordis": "^3.18.1",
+    "@excel-harness/shared": "workspace:*"
   }
 }

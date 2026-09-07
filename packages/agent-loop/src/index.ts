@@ -158,8 +158,27 @@ export class AgentLoop extends Service<AgentLoopConfig> {
         }
 
         // 8. 执行所有工具调用
-        for (const tc of toolCalls) {
-          if (signal.aborted) break
+        for (let i = 0; i < toolCalls.length; i++) {
+          const tc = toolCalls[i]
+          if (signal.aborted) {
+            // 对剩余未执行完的工具调用，补全被中断的响应消息，保持协议闭环
+            for (let j = i; j < toolCalls.length; j++) {
+              const abortedTc = toolCalls[j]
+              const abortedOutput = JSON.stringify({ status: 'aborted', message: '工具调用已被用户手动中止' })
+              this.ctx.sessions.appendMessage(sessionId, {
+                role: 'tool',
+                content: abortedOutput,
+                toolCallId: abortedTc.id,
+                toolName: abortedTc.function.name,
+              })
+              history.push({
+                role: 'tool',
+                tool_call_id: abortedTc.id,
+                content: abortedOutput,
+              })
+            }
+            break
+          }
 
           logger.info(`执行工具: ${tc.function.name}`)
           let argsJson = tc.function.arguments
@@ -195,6 +214,12 @@ export class AgentLoop extends Service<AgentLoopConfig> {
 
       if (steps >= this.maxSteps) {
         logger.warn(`已达到最大步骤数 ${this.maxSteps}，强制结束`)
+        const timeoutNotice = `\n\n⚠️ 本轮交互已达到最大推理步骤限制 (${this.maxSteps} 步)，已自动结束。若有需要请细化需求后重新提问。`
+        onChunk?.(timeoutNotice)
+        this.ctx.sessions.appendMessage(sessionId, {
+          role: 'assistant',
+          content: timeoutNotice,
+        })
       }
     } finally {
       this.runningControllers.delete(sessionId)
@@ -217,6 +242,17 @@ export class AgentLoop extends Service<AgentLoopConfig> {
       })
     }
 
+    // 收集所有合法已存储的 tool 消息的 toolCallId
+    const toolResponseIds = new Set<string>()
+    for (const msg of session.messages) {
+      if (msg.role === 'tool' && msg.toolCallId) {
+        toolResponseIds.add(msg.toolCallId)
+      }
+    }
+
+    // 记录装载进入 history 的合法 toolCallId
+    const admittedToolCallIds = new Set<string>()
+
     for (const msg of session.messages) {
       if (msg.role === 'user') {
         const last = history[history.length - 1]
@@ -227,24 +263,35 @@ export class AgentLoop extends Service<AgentLoopConfig> {
           history.push({ role: 'user', content: msg.content })
         }
       } else if (msg.role === 'assistant') {
-        const hasToolCalls = Boolean(msg.toolCalls && msg.toolCalls.length > 0)
-        history.push({
-          role: 'assistant',
-          content: msg.content || null,
-          tool_calls: hasToolCalls
-            ? msg.toolCalls!.map((tc) => ({
-                id: tc.id,
-                type: 'function' as const,
-                function: { name: tc.name, arguments: tc.arguments },
-              }))
-            : undefined,
-        })
+        // 自愈过滤：只保留确实有对应 tool 消息的有效 tool_calls，彻底消除 DeepSeek 400 孤儿调用报错
+        const validToolCalls = (msg.toolCalls || []).filter((tc) => toolResponseIds.has(tc.id))
+        const hasValidToolCalls = validToolCalls.length > 0
+
+        validToolCalls.forEach((tc) => admittedToolCallIds.add(tc.id))
+
+        // 只有当有正文文本或者有效 tool_calls 时才推入
+        if (msg.content || hasValidToolCalls) {
+          history.push({
+            role: 'assistant',
+            content: msg.content || null,
+            tool_calls: hasValidToolCalls
+              ? validToolCalls.map((tc) => ({
+                  id: tc.id,
+                  type: 'function' as const,
+                  function: { name: tc.name, arguments: tc.arguments },
+                }))
+              : undefined,
+          })
+        }
       } else if (msg.role === 'tool') {
-        history.push({
-          role: 'tool',
-          tool_call_id: msg.toolCallId!,
-          content: msg.content,
-        })
+        // 严格配对：仅保留与已装配的 assistant tool_call 对应匹配的 tool 消息
+        if (msg.toolCallId && admittedToolCallIds.has(msg.toolCallId)) {
+          history.push({
+            role: 'tool',
+            tool_call_id: msg.toolCallId,
+            content: msg.content,
+          })
+        }
       }
     }
     return history

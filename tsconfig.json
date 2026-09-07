@@ -7,6 +7,7 @@
     "strict": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
+    "allowImportingTsExtensions": true,
     "noEmit": true,
     "baseUrl": ".",
     "paths": {
@@ -15,7 +16,8 @@
       "@excel-harness/tools": ["packages/tools/src/index.ts"],
       "@excel-harness/agent-loop": ["packages/agent-loop/src/index.ts"],
       "@excel-harness/web-host": ["packages/web-host/src/index.ts"],
-      "@excel-harness/excel-tool": ["packages/excel-tool/src/index.ts"]
+      "@excel-harness/excel-tool": ["packages/excel-tool/src/index.ts"],
+      "@excel-harness/shared": ["packages/shared/src/index.ts"]
     }
   },
   "exclude": ["node_modules", "apps/web", "**/*.spec.ts"]

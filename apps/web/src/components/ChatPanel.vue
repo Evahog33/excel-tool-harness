@@ -49,7 +49,7 @@
           </div>
           <!-- 正式回答正文 -->
           <div v-if="store.streamingText" class="message-content">
-            {{ store.streamingText }}<span class="cursor">▌</span>
+            <span v-html="renderContent(store.streamingText)"></span><span class="cursor">▌</span>
           </div>
         </div>
 
@@ -178,14 +178,52 @@ function roleLabel(role: string) {
   return role === 'user' ? '👤 你' : role === 'tool' ? '🔧 工具' : '🤖 助手'
 }
 
-function renderContent(content?: string | null) {
+function renderContent(content?: string | null): string {
   if (!content) return ''
-  // 简单转义 + 换行处理
-  return content
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/\n/g, '<br>')
+
+  // 1. 全局 HTML 转义（防止任何 XSS 注入）
+  const escapeHtml = (str: string) =>
+    str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+
+  // 2. 抽取多行代码块占位处理（防止代码块内的格式化标记被误解析）
+  const codeBlocks: string[] = []
+  let text = content.replace(/```([\w-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    const safeCode = escapeHtml(code.trimEnd())
+    const langLabel = lang ? `<div class="code-lang">${escapeHtml(lang)}</div>` : ''
+    const idx = codeBlocks.length
+    codeBlocks.push(
+      `<div class="code-block-wrap">${langLabel}<pre class="code-block"><code>${safeCode}</code></pre></div>`,
+    )
+    return `__CODE_BLOCK_${idx}__`
+  })
+
+  // 3. 转义普通文本
+  text = escapeHtml(text)
+
+  // 4. 解析内联代码 `code`
+  text = text.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
+
+  // 5. 解析粗体 **text** 和斜体 *text*
+  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  text = text.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>')
+
+  // 6. 解析无序列表 - item 或 * item
+  text = text.replace(/^[ \t]*[-*][ \t]+(.+)$/gm, '<li class="md-li">$1</li>')
+
+  // 7. 解析换行
+  text = text.replace(/\n/g, '<br>')
+
+  // 8. 还原代码块
+  text = text.replace(/__CODE_BLOCK_(\d+)__/g, (_, idx) => {
+    return codeBlocks[Number(idx)] || ''
+  })
+
+  return text
 }
 
 // 自动滚动到底部
@@ -338,5 +376,44 @@ watch(
 .icon-edit {
   width: 14px;
   height: 14px;
+}
+
+/* Markdown 排版增强样式 */
+:deep(.code-block-wrap) {
+  margin: 8px 0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #1e293b;
+  border: 1px solid #334155;
+}
+:deep(.code-lang) {
+  padding: 4px 10px;
+  background: #0f172a;
+  color: #94a3b8;
+  font-size: 11px;
+  font-family: monospace;
+  text-transform: uppercase;
+  border-bottom: 1px solid #334155;
+}
+:deep(.code-block) {
+  margin: 0;
+  padding: 10px 14px;
+  overflow-x: auto;
+  color: #f8fafc;
+  font-family: 'Fira Code', Consolas, Monaco, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+:deep(.inline-code) {
+  background: rgba(0, 0, 0, 0.08);
+  color: #ef4444;
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 12px;
+}
+:deep(.md-li) {
+  margin-left: 16px;
+  list-style-type: disc;
 }
 </style>

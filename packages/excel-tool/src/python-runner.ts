@@ -4,13 +4,17 @@
  */
 
 import { spawn, execFile } from 'child_process'
-import { writeFileSync, mkdirSync, existsSync, unlinkSync, readdirSync } from 'fs'
+import { writeFileSync, mkdirSync, existsSync, unlinkSync, readdirSync, rmSync } from 'fs'
 import { join, dirname, basename, resolve } from 'path'
 import { randomUUID } from 'crypto'
 import { promisify } from 'util'
 import { StringDecoder } from 'string_decoder'
+import { fileURLToPath } from 'node:url'
+import type { ToolRunParams } from '@excel-harness/shared'
 
 const execFileAsync = promisify(execFile)
+
+export const DEFAULT_PYTHON_CMD = process.platform === 'win32' ? 'python' : 'python3'
 
 export interface OutputFileInfo {
   filename: string
@@ -21,9 +25,11 @@ export interface RunPythonOptions {
   /** Python 脚本内容 */
   code: string
   /** 传入脚本的参数（将落盘为 input.json） */
-  params?: Record<string, string>
+  params?: ToolRunParams
   /** 超时时间（ms），默认 60000 */
   timeoutMs?: number
+  /** 是否为预检试跑（试跑完成后会自动销毁临时测试目录） */
+  isPreflight?: boolean
   /** 临时文件目录 */
   tmpDir?: string
   /** Python 可执行文件路径 */
@@ -52,7 +58,7 @@ export async function runPython(opts: RunPythonOptions): Promise<RunPythonResult
     code,
     params = {},
     timeoutMs = 60_000,
-    pythonPath = process.env.PYTHON_PATH ?? 'python3',
+    pythonPath = process.env.PYTHON_PATH ?? DEFAULT_PYTHON_CMD,
     maxLogBytes = 2 * 1024 * 1024, // 默认最大捕获 2MB 日志，防 OOM
     onStdout,
     onStderr,
@@ -124,7 +130,11 @@ else:
       try {
         if (isWindows) {
           // Windows 上通过 taskkill 递归终结整棵进程树
-          pyProcess.kill(forceKill ? 'SIGKILL' : 'SIGTERM')
+          if (forceKill) {
+            spawn('taskkill', ['/pid', String(pid), '/t', '/f'])
+          } else {
+            pyProcess.kill('SIGTERM')
+          }
         } else {
           // Unix/macOS 上向负 PID 广播信号，彻底清理所有子孙进程
           process.kill(-pid, forceKill ? 'SIGKILL' : 'SIGTERM')
@@ -146,6 +156,9 @@ else:
         graceTimer.unref()
 
         try { unlinkSync(scriptPath) } catch {}
+        if (opts.isPreflight) {
+          try { rmSync(outputDir, { recursive: true, force: true }) } catch {}
+        }
         resolve({
           success: false,
           stdout: stdoutBuffer + stdoutDecoder.end(),
@@ -192,6 +205,9 @@ else:
         isFinished = true
         clearTimeout(timer)
         try { unlinkSync(scriptPath) } catch {}
+        if (opts.isPreflight) {
+          try { rmSync(outputDir, { recursive: true, force: true }) } catch {}
+        }
         resolve({
           success: false,
           stdout: stdoutBuffer + stdoutDecoder.end(),
@@ -224,6 +240,10 @@ else:
               })
             }
           }
+        }
+
+        if (opts.isPreflight) {
+          try { rmSync(outputDir, { recursive: true, force: true }) } catch {}
         }
 
         resolve({
@@ -266,8 +286,9 @@ export interface ExcelInspectionResult {
 }
 
 /** 检查 Excel 结构与智能嗅探敏感字段 */
-export async function inspectExcel(filepath: string, pythonPath = process.env.PYTHON_PATH ?? 'python3'): Promise<ExcelInspectionResult> {
-  const inspectorScript = join(dirname(new URL(import.meta.url).pathname), 'inspector.py')
+export async function inspectExcel(filepath: string, pythonPath = process.env.PYTHON_PATH ?? DEFAULT_PYTHON_CMD): Promise<ExcelInspectionResult> {
+  const currentDir = dirname(fileURLToPath(import.meta.url))
+  const inspectorScript = join(currentDir, 'inspector.py')
   const { stdout, stderr } = await execFileAsync(pythonPath, [inspectorScript, filepath], {
     timeout: 30_000,
   })
@@ -282,4 +303,32 @@ export async function inspectExcel(filepath: string, pythonPath = process.env.PY
   }
 
   return res.data
+}
+
+/** 静态检查 Python 代码语法是否正确，防范无挂载数据源时的预检死循环 */
+export async function checkPythonSyntax(
+  code: string,
+  pythonPath = process.env.PYTHON_PATH ?? DEFAULT_PYTHON_CMD,
+): Promise<{ success: boolean; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(pythonPath, ['-c', 'import sys, ast\nast.parse(sys.stdin.read())'])
+    let stderr = ''
+    child.stderr.on('data', (d) => {
+      stderr += d.toString('utf-8')
+    })
+    child.on('close', (exitCode) => {
+      resolve({
+        success: exitCode === 0,
+        stderr: stderr.trim(),
+      })
+    })
+    child.on('error', (err) => {
+      resolve({
+        success: false,
+        stderr: err.message,
+      })
+    })
+    child.stdin.write(code, 'utf-8')
+    child.stdin.end()
+  })
 }

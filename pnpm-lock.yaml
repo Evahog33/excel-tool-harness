@@ -50,6 +50,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@excel-harness/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       axios:
         specifier: ^1.7.0
         version: 1.20.0
@@ -96,6 +99,9 @@ importers:
       '@excel-harness/session':
         specifier: workspace:*
         version: link:../session
+      '@excel-harness/shared':
+        specifier: workspace:*
+        version: link:../shared
       '@excel-harness/tools':
         specifier: workspace:*
         version: link:../tools
@@ -114,27 +120,35 @@ importers:
 
   packages/session:
     dependencies:
+      '@excel-harness/shared':
+        specifier: workspace:*
+        version: link:../shared
       cordis:
         specifier: ^3.18.1
         version: 3.18.1
+
+  packages/shared: {}
 
   packages/tools:
     dependencies:
       cordis:
         specifier: ^3.18.1
         version: 3.18.1
-      zod:
-        specifier: ^3.23.0
-        version: 3.25.76
 
   packages/web-host:
     dependencies:
       '@excel-harness/agent-loop':
         specifier: workspace:*
         version: link:../agent-loop
+      '@excel-harness/excel-tool':
+        specifier: workspace:*
+        version: link:../excel-tool
       '@excel-harness/session':
         specifier: workspace:*
         version: link:../session
+      '@excel-harness/shared':
+        specifier: workspace:*
+        version: link:../shared
       '@koa/cors':
         specifier: ^5.0.0
         version: 5.0.0

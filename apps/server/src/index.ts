@@ -59,13 +59,41 @@ ctx.plugin(webHostPlugin, {
   staticDir: 'apps/web/dist',
 })
 
-// ─── 优雅退出 ─────────────────────────────────────────────────────────────────
-process.on('SIGINT', async () => {
-  console.log('\n正在关闭服务...')
+const handleShutdown = async (signal: string) => {
+  console.log(`\n接收到 ${signal} 信号，正在关闭服务...`)
   await ctx.stop()
   process.exit(0)
-})
+}
 
+process.on('SIGINT', () => handleShutdown('SIGINT'))
+process.on('SIGTERM', () => handleShutdown('SIGTERM'))
+
+// ─── 本地 Python 执行环境自检 ───────────────────────────────────────────────────
+import { execFile } from 'child_process'
+import { promisify } from 'util'
+const execFileAsync = promisify(execFile)
+
+async function checkPythonEnvironment() {
+  const pyCmd = process.env.PYTHON_PATH ?? (process.platform === 'win32' ? 'python' : 'python3')
+  try {
+    const { stdout } = await execFileAsync(
+      pyCmd,
+      [
+        '-c',
+        'import sys, pandas, openpyxl; print(f"{sys.version_info.major}.{sys.version_info.minor}|{pandas.__version__}|{openpyxl.__version__}")',
+      ],
+      { timeout: 10_000 },
+    )
+    const [pyVer, pdVer, xlVer] = stdout.trim().split('|')
+    console.log(`🐍 Python 执行环境就绪: Python ${pyVer}, pandas ${pdVer}, openpyxl ${xlVer}`)
+  } catch (err: any) {
+    console.warn(`⚠️  Python 执行环境自检警告: 无法正常调用 Python 或缺失必要库 (pandas/openpyxl)`)
+    console.warn(`   命令: ${pyCmd}, 详情: ${err.message}`)
+    console.warn(`   请执行: pip install pandas openpyxl`)
+  }
+}
+
+await checkPythonEnvironment()
 await ctx.start()
 console.log('✅ Excel Tool Harness 已启动')
 console.log(`   后端 API : http://${process.env.HOST ?? '127.0.0.1'}:${process.env.PORT ?? 3080}`)

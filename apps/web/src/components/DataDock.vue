@@ -10,7 +10,7 @@
       ref="fileInputRef"
       type="file"
       multiple
-      accept=".xlsx,.xls,.csv"
+      accept=".xlsx,.csv"
       class="file-input-hidden"
       @change="handleFileSelect"
     />
@@ -164,9 +164,11 @@ function triggerFileInput() {
 }
 
 async function handleFileSelect(e: Event) {
-  const files = (e.target as HTMLInputElement).files
+  const target = e.target as HTMLInputElement
+  const files = target.files
   if (!files || files.length === 0) return
   await uploadFiles(Array.from(files))
+  target.value = ''
   if (fileInputRef.value) fileInputRef.value.value = ''
 }
 
@@ -179,9 +181,10 @@ async function handleDrop(e: DragEvent) {
 
 async function uploadFiles(files: File[]) {
   try {
-    const newFiles = await store.uploadExcel(files)
+    const res = await store.uploadExcel(files)
+    const newFiles = res?.newFiles || []
     // 如果有识别出敏感列的文件，自动打开第一个文件的脱敏配置弹窗
-    const firstSensitive = newFiles.find((f) => f.sensitiveColumns && f.sensitiveColumns.length > 0)
+    const firstSensitive = newFiles.find((f: ExcelMeta) => f.sensitiveColumns && f.sensitiveColumns.length > 0)
     if (firstSensitive) {
       openModalFor(firstSensitive)
     }

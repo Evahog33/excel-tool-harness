@@ -5,105 +5,23 @@
  */
 
 import { Context, Service } from 'cordis'
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, rmSync } from 'fs'
+import { readFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, rmSync, promises as fsPromises } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
+import type {
+  MessageRole,
+  ToolCall,
+  SessionMessage,
+  DesensitizationRuleConfig,
+  SensitiveColumnInfo,
+  ExcelMeta,
+  Session,
+  UiSchema,
+  UiFieldOption,
+  UiField,
+} from '@excel-harness/shared'
 
-// ─── 类型定义 ─────────────────────────────────────────────────────────────────
-
-export type MessageRole = 'user' | 'assistant' | 'tool'
-
-export interface SessionMessage {
-  id: string
-  role: MessageRole
-  content: string
-  /** 工具调用时使用 */
-  toolCalls?: ToolCall[]
-  /** 工具结果时使用 */
-  toolCallId?: string
-  toolName?: string
-  createdAt: number
-}
-
-export interface ToolCall {
-  id: string
-  name: string
-  arguments: string // JSON string
-}
-
-export interface DesensitizationRuleConfig {
-  column: string
-  enabled: boolean
-  ruleType: 'id_card_mask' | 'phone_mask' | 'name_mask' | 'email_mask' | 'bank_card_mask' | 'amount_mask' | 'exclude'
-  label: string
-}
-
-export interface SensitiveColumnInfo {
-  column: string
-  type: string
-  rule: string
-  label: string
-  reason: string
-  desc: string
-}
-
-export interface ExcelMeta {
-  fileId: string
-  filename: string
-  filepath: string
-  fileSizeBytes: number
-  uploadedAt: number
-  sheets: string[]
-  activeSheet: string
-  rowCount: number
-  columnCount: number
-  headerLevels: number
-  headerStartRow: number
-  headerEndRow: number
-  dataStartRow: number
-  headers: string[]
-  sampleRows: Record<string, any>[]
-  sensitiveColumns: SensitiveColumnInfo[]
-  desensitizationRules?: DesensitizationRuleConfig[]
-  sanitizedSamples?: Record<string, any>[]
-}
-
-export interface Session {
-  id: string
-  title: string
-  createdAt: number
-  updatedAt: number
-  messages: SessionMessage[]
-  /** 挂载的 Excel 数据源及其脱敏元数据（旧版单文件兼容） */
-  excelMeta?: ExcelMeta
-  /** 挂载的多个 Excel 数据源列表 */
-  excelFiles?: ExcelMeta[]
-  /** 右侧沙箱最新的 UI Schema（JSON Schema 驱动表单） */
-  uiSchema?: UiSchema
-  /** 最新生成的 Python 脚本 */
-  pythonCode?: string
-}
-
-export interface UiSchema {
-  title: string
-  fields: UiField[]
-}
-
-export interface UiFieldOption {
-  label: string
-  value: string
-}
-
-export interface UiField {
-  name: string
-  label: string
-  type: 'text' | 'number' | 'file' | 'select' | 'checkbox'
-  required?: boolean
-  options?: (string | UiFieldOption)[]  // for select
-  default?: any
-  accept?: string     // for file, e.g. '.xlsx,.xls'
-  description?: string
-}
+export * from '@excel-harness/shared'
 
 export interface SessionServiceConfig {
   sessionDir?: string
@@ -116,22 +34,23 @@ export class SessionService extends Service<SessionServiceConfig> {
 
   private sessionDir: string
   private cache = new Map<string, Session>()
+  private writeQueues = new Map<string, Promise<void>>()
 
-  constructor(ctx: Context, config: SessionServiceConfig) {
+  constructor(ctx: Context, config: SessionServiceConfig = {}) {
     super(ctx, 'sessions')
-    this.sessionDir = config.sessionDir ?? '.sessions'
+    this.sessionDir = config.sessionDir ?? join(process.cwd(), '.sessions')
     this._ensureDir()
     this._loadAll()
-    ctx.logger('session').info(`会话服务已初始化，存储目录: ${this.sessionDir}`)
   }
 
   /** 创建新会话 */
-  create(title = '新会话'): Session {
+  create(title = '新对话'): Session {
+    const now = Date.now()
     const session: Session = {
       id: randomUUID(),
       title,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
+      createdAt: now,
+      updatedAt: now,
       messages: [],
     }
     this.cache.set(session.id, session)
@@ -140,12 +59,12 @@ export class SessionService extends Service<SessionServiceConfig> {
     return session
   }
 
-  /** 获取会话 */
+  /** 获取会话，若不存在返回 undefined */
   get(id: string): Session | undefined {
     return this.cache.get(id)
   }
 
-  /** 列出所有会话（按更新时间倒序） */
+  /** 获取所有会话列表（按最后更新时间倒序） */
   list(): Session[] {
     return [...this.cache.values()].sort((a, b) => b.updatedAt - a.updatedAt)
   }
@@ -156,6 +75,7 @@ export class SessionService extends Service<SessionServiceConfig> {
     if (!session) return false
 
     this.cache.delete(id)
+    this.writeQueues.delete(id)
 
     // 删除 session json 文件
     const jsonPath = join(this.sessionDir, `${id}.json`)
@@ -186,9 +106,10 @@ export class SessionService extends Service<SessionServiceConfig> {
     session.messages.push(fullMsg)
     session.updatedAt = Date.now()
 
-    // 自动从第一条用户消息生成标题
+    // 自动从第一条用户消息生成标题（去除多余换行和空格，更友好地截取）
     if (session.messages.length === 1 && msg.role === 'user') {
-      session.title = msg.content.slice(0, 30) + (msg.content.length > 30 ? '…' : '')
+      const cleanContent = msg.content.replace(/\s+/g, ' ').trim()
+      session.title = cleanContent.slice(0, 30) + (cleanContent.length > 30 ? '…' : '') || '新对话'
     }
 
     this._persist(session)
@@ -285,13 +206,19 @@ export class SessionService extends Service<SessionServiceConfig> {
     return session.excelFiles
   }
 
-  /** 移除指定的 Excel 文件 */
+  /** 移除指定的 Excel 文件并清理磁盘物理文件 */
   removeExcelFile(sessionId: string, fileId: string): ExcelMeta[] {
     const session = this.cache.get(sessionId)
     if (!session) throw new Error(`会话不存在: ${sessionId}`)
     if (!session.excelFiles) {
       session.excelFiles = session.excelMeta ? [session.excelMeta] : []
     }
+
+    const target = session.excelFiles.find((f) => f.fileId === fileId)
+    if (target && target.filepath && existsSync(target.filepath)) {
+      try { unlinkSync(target.filepath) } catch {}
+    }
+
     session.excelFiles = session.excelFiles.filter((f) => f.fileId !== fileId)
     session.excelMeta = session.excelFiles[0] || undefined
     session.updatedAt = Date.now()
@@ -300,10 +227,16 @@ export class SessionService extends Service<SessionServiceConfig> {
     return session.excelFiles
   }
 
-  /** 清空会话的所有 Excel 文件 */
+  /** 清空会话的所有 Excel 文件并清理磁盘物理文件 */
   clearExcelFiles(sessionId: string): void {
     const session = this.cache.get(sessionId)
     if (!session) throw new Error(`会话不存在: ${sessionId}`)
+    const filesToClean = session.excelFiles || (session.excelMeta ? [session.excelMeta] : [])
+    for (const f of filesToClean) {
+      if (f.filepath && existsSync(f.filepath)) {
+        try { unlinkSync(f.filepath) } catch {}
+      }
+    }
     session.excelFiles = []
     session.excelMeta = undefined
     session.updatedAt = Date.now()
@@ -332,7 +265,14 @@ export class SessionService extends Service<SessionServiceConfig> {
 
   private _persist(session: Session) {
     const path = join(this.sessionDir, `${session.id}.json`)
-    writeFileSync(path, JSON.stringify(session, null, 2), 'utf-8')
+    const data = JSON.stringify(session, null, 2)
+    const currentQueue = this.writeQueues.get(session.id) || Promise.resolve()
+    const nextWrite = currentQueue
+      .then(() => fsPromises.writeFile(path, data, 'utf-8'))
+      .catch((err) => {
+        this.ctx.logger('session').warn(`持久化会话失败 [${session.id}]:`, err)
+      })
+    this.writeQueues.set(session.id, nextWrite)
   }
 
   private _loadAll() {
@@ -366,10 +306,10 @@ declare module 'cordis' {
     sessions: SessionService
   }
   interface Events {
-    'session/created': (session: import('./index.ts').Session) => void
-    'session/message': (data: { sessionId: string; message: import('./index.ts').SessionMessage }) => void
-    'session/assets-updated': (data: { sessionId: string; uiSchema?: import('./index.ts').UiSchema; pythonCode?: string }) => void
-    'session/excel-meta-updated': (data: { sessionId: string; excelMeta?: import('./index.ts').ExcelMeta; excelFiles?: import('./index.ts').ExcelMeta[] }) => void
+    'session/created': (session: Session) => void
+    'session/message': (data: { sessionId: string; message: SessionMessage }) => void
+    'session/assets-updated': (data: { sessionId: string; uiSchema?: UiSchema; pythonCode?: string }) => void
+    'session/excel-meta-updated': (data: { sessionId: string; excelMeta?: ExcelMeta; excelFiles?: ExcelMeta[] }) => void
     'session/messages-truncated': (data: { sessionId: string; remainingCount: number }) => void
     'session/deleted': (data: { sessionId: string }) => void
   }

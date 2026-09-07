@@ -1,88 +1,42 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import axios from 'axios'
+import type {
+  SessionMessage,
+  UiFieldOption,
+  UiField,
+  UiSchema,
+  DesensitizationRuleConfig,
+  SensitiveColumnInfo,
+  ExcelMeta,
+  Session as SharedSession,
+  OutputFileMeta,
+  ToolExecutionResult,
+  ToolRunParams,
+  FormFieldValue,
+} from '@excel-harness/shared'
 
-export interface Message {
-  id: string
-  role: 'user' | 'assistant' | 'tool'
-  content: string
-  createdAt: number
+export type Message = SessionMessage
+export type {
+  UiFieldOption,
+  UiField,
+  UiSchema,
+  DesensitizationRuleConfig,
+  SensitiveColumnInfo,
+  ExcelMeta,
+  OutputFileMeta,
+  ToolExecutionResult,
+  ToolRunParams,
+  FormFieldValue,
 }
 
-export interface UiFieldOption {
-  label: string
-  value: string
-}
-
-export interface UiField {
-  name: string
-  label: string
-  type: 'text' | 'number' | 'file' | 'select' | 'checkbox'
-  required?: boolean
-  options?: (string | UiFieldOption)[]
-  default?: any
-  accept?: string
-  description?: string
-}
-
-export interface UiSchema {
-  title: string
-  fields: UiField[]
-}
-
-export interface DesensitizationRuleConfig {
-  column: string
-  enabled: boolean
-  ruleType: 'id_card_mask' | 'phone_mask' | 'name_mask' | 'email_mask' | 'bank_card_mask' | 'amount_mask' | 'exclude'
-  label: string
-}
-
-export interface SensitiveColumnInfo {
-  column: string
-  type: string
-  rule: string
-  label: string
-  reason: string
-  desc: string
-}
-
-export interface ExcelMeta {
-  fileId: string
-  filename: string
-  filepath: string
-  fileSizeBytes: number
-  uploadedAt: number
-  sheets: string[]
-  activeSheet: string
-  rowCount: number
-  columnCount: number
-  headerLevels: number
-  headerStartRow: number
-  headerEndRow: number
-  dataStartRow: number
-  headers: string[]
-  sampleRows: Record<string, any>[]
-  sensitiveColumns: SensitiveColumnInfo[]
-  desensitizationRules?: DesensitizationRuleConfig[]
-  sanitizedSamples?: Record<string, any>[]
-}
-
-export interface Session {
-  id: string
-  title: string
-  createdAt: number
-  updatedAt: number
-  messages: Message[]
-  excelMeta?: ExcelMeta
-  excelFiles?: ExcelMeta[]
-  uiSchema?: UiSchema
-  pythonCode?: string
-}
+export type Session = SharedSession
 
 export const useChatStore = defineStore('chat', () => {
   const sessions = ref<Session[]>([])
   const currentSessionId = ref<string | null>(null)
   const isStreaming = ref(false)
+  const isRunningScript = ref(false)
   const streamingText = ref('')
   const reasoningText = ref('')
   const uiSchema = ref<UiSchema | null>(null)
@@ -90,13 +44,7 @@ export const useChatStore = defineStore('chat', () => {
   const excelFiles = ref<ExcelMeta[]>([])
   const excelMeta = computed(() => excelFiles.value[0] || null)
   const isUploadingExcel = ref(false)
-  const runResult = ref<{
-    success: boolean
-    stdout: string
-    stderr: string
-    durationMs?: number
-    outputFiles?: { filename: string; filepath: string }[]
-  } | null>(null)
+  const runResult = ref<ToolExecutionResult | null>(null)
 
   const currentSession = computed(() =>
     sessions.value.find((s) => s.id === currentSessionId.value) ?? null,
@@ -135,85 +83,125 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  /** 切换会话 */
+  /** 选中会话，加载资产与元数据 */
   async function selectSession(id: string) {
     currentSessionId.value = id
-    const { data } = await axios.get(`/api/sessions/${id}`)
-    const idx = sessions.value.findIndex((s) => s.id === id)
-    if (idx >= 0) sessions.value[idx] = data.session
-
-    // 加载最新资产与 Excel 元数据列表
-    const { data: assets } = await axios.get(`/api/sessions/${id}/assets`)
-    uiSchema.value = assets.uiSchema
-    pythonCode.value = assets.pythonCode
-    excelFiles.value = assets.excelFiles || (assets.excelMeta ? [assets.excelMeta] : []) || data.session?.excelFiles || (data.session?.excelMeta ? [data.session.excelMeta] : [])
     runResult.value = null
+
+    // 优先从 sessions 列表中获取本地已有数据
+    const session = sessions.value.find((s) => s.id === id)
+    if (session) {
+      uiSchema.value = session.uiSchema ?? null
+      pythonCode.value = session.pythonCode ?? null
+      excelFiles.value = session.excelFiles || (session.excelMeta ? [session.excelMeta] : [])
+    }
+
+    // 后台拉取最新资产全量同步
+    try {
+      const { data } = await axios.get(`/api/sessions/${id}/assets`)
+      uiSchema.value = data.uiSchema
+      pythonCode.value = data.pythonCode
+      if (data.excelFiles && Array.isArray(data.excelFiles)) {
+        excelFiles.value = data.excelFiles
+      } else if (data.excelMeta) {
+        excelFiles.value = [data.excelMeta]
+      } else {
+        excelFiles.value = []
+      }
+    } catch {}
   }
 
-  /** 上传一个或多个 Excel 文件并智能解析 */
-  async function uploadExcel(files: File | File[]): Promise<ExcelMeta[]> {
-    if (!currentSessionId.value) throw new Error('未选择会话')
+  /** 上传一个或多个 Excel 文件到当前会话 */
+  async function uploadExcel(files: File[]): Promise<{
+    ok: boolean
+    newFiles: ExcelMeta[]
+    excelFiles: ExcelMeta[]
+    excelMeta?: ExcelMeta
+  } | undefined> {
+    if (!currentSessionId.value) return
     isUploadingExcel.value = true
     try {
       const formData = new FormData()
-      const fileList = Array.isArray(files) ? files : [files]
-      for (const file of fileList) {
+      for (const file of files) {
         formData.append('file', file)
       }
-      const { data } = await axios.post(`/api/sessions/${currentSessionId.value}/upload-excel`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      })
-      if (!data.ok) throw new Error(data.error || '上传失败')
-      excelFiles.value = data.excelFiles || []
-      if (currentSession.value) {
-        currentSession.value.excelFiles = data.excelFiles
-        currentSession.value.excelMeta = data.excelFiles?.[0]
+      const { data } = await axios.post(
+        `/api/sessions/${currentSessionId.value}/upload-excel`,
+        formData,
+        { headers: { 'Content-Type': 'multipart/form-data' } },
+      )
+      if (data.ok) {
+        if (data.excelFiles) {
+          excelFiles.value = data.excelFiles
+        }
+        const session = sessions.value.find((s) => s.id === currentSessionId.value)
+        if (session) {
+          session.excelFiles = excelFiles.value
+          session.excelMeta = excelFiles.value[0] || undefined
+        }
       }
-      return data.newFiles || data.excelFiles || []
+      return data
     } finally {
       isUploadingExcel.value = false
     }
   }
 
-  /** 保存指定文件的脱敏规则配置 */
-  async function saveDesensitizeConfig(fileId: string, rules: DesensitizationRuleConfig[]): Promise<ExcelMeta> {
-    if (!currentSessionId.value) throw new Error('未选择会话')
-    const { data } = await axios.post(`/api/sessions/${currentSessionId.value}/excel/${fileId}/desensitize-config`, { rules })
-    if (!data.ok) throw new Error(data.error || '保存脱敏配置失败')
-    excelFiles.value = data.excelFiles || []
-    if (currentSession.value) {
-      currentSession.value.excelFiles = data.excelFiles
-      currentSession.value.excelMeta = data.excelFiles?.[0]
+  /** 保存指定 Excel 文件的脱敏规则配置 */
+  async function saveDesensitizeConfig(fileId: string, rules: DesensitizationRuleConfig[]) {
+    if (!currentSessionId.value) return
+    const { data } = await axios.post(
+      `/api/sessions/${currentSessionId.value}/excel/${fileId}/desensitize-config`,
+      { rules },
+    )
+    if (data.ok) {
+      if (data.excelFiles) {
+        excelFiles.value = data.excelFiles
+      }
+      const session = sessions.value.find((s) => s.id === currentSessionId.value)
+      if (session) {
+        session.excelFiles = excelFiles.value
+        session.excelMeta = excelFiles.value[0] || undefined
+      }
     }
-    return data.excelMeta
+    return data
   }
 
-  /** 移除指定单个 Excel 文件 */
-  async function removeExcelFile(fileId: string): Promise<void> {
+  /** 从当前会话移除指定的 Excel 文件 */
+  async function removeExcelFile(fileId: string) {
     if (!currentSessionId.value) return
-    const { data } = await axios.delete(`/api/sessions/${currentSessionId.value}/excel/${fileId}`)
-    excelFiles.value = data.excelFiles || []
-    if (currentSession.value) {
-      currentSession.value.excelFiles = data.excelFiles
-      currentSession.value.excelMeta = data.excelFiles?.[0]
+    const { data } = await axios.delete(
+      `/api/sessions/${currentSessionId.value}/excel/${fileId}`,
+    )
+    if (data.ok) {
+      excelFiles.value = data.excelFiles || []
+      const session = sessions.value.find((s) => s.id === currentSessionId.value)
+      if (session) {
+        session.excelFiles = excelFiles.value
+        session.excelMeta = excelFiles.value[0] || undefined
+      }
     }
+    return data
   }
 
-  /** 移除所有 Excel 文件挂载 */
-  async function removeExcel(): Promise<void> {
+  /** 清空当前会话挂载的所有 Excel 文件 */
+  async function removeExcel() {
     if (!currentSessionId.value) return
-    await axios.delete(`/api/sessions/${currentSessionId.value}/excel`)
-    excelFiles.value = []
-    if (currentSession.value) {
-      currentSession.value.excelFiles = []
-      currentSession.value.excelMeta = undefined
+    const { data } = await axios.delete(`/api/sessions/${currentSessionId.value}/excel`)
+    if (data.ok) {
+      excelFiles.value = []
+      const session = sessions.value.find((s) => s.id === currentSessionId.value)
+      if (session) {
+        session.excelFiles = []
+        session.excelMeta = undefined
+      }
     }
+    return data
   }
 
   let activeAbortController: AbortController | null = null
   const wasAborted = ref(false)
 
-  /** 发送消息（SSE 流式） */
+  /** 发送消息，通过 fetch 处理 SSE 流式响应 */
   async function sendMessage(message: string) {
     if (!currentSessionId.value || isStreaming.value) return
 
@@ -252,6 +240,8 @@ export const useChatStore = defineStore('chat', () => {
       const decoder = new TextDecoder()
       let assistantMsg = ''
       let buffer = ''
+      let currentEvent = 'message' // 补全声明，防止严格模式下未声明变量报错
+
       const handleLine = (line: string) => {
         const trimmed = line.trim()
         if (!trimmed) {
@@ -333,7 +323,7 @@ export const useChatStore = defineStore('chat', () => {
         }
       }
     } finally {
-      // 权威同步：先刷新当前会话全部最新状态（确保最新回答与资产落盘生效），再关闭流式状态
+      // 权威同步：先刷新当前会话全部最新状态，再关闭流式状态
       if (currentSessionId.value) {
         try {
           await selectSession(currentSessionId.value)
@@ -371,7 +361,6 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const { data } = await axios.post(`/api/sessions/${currentSessionId.value}/pop-message`)
       if (data.ok) {
-        // 同步前端会话中的 messages
         const session = sessions.value.find((s) => s.id === currentSessionId.value)
         if (session && data.session) {
           session.messages = data.session.messages
@@ -398,11 +387,16 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /** 执行 Python 脚本（沙箱触发） */
-  async function runScript(params: Record<string, string>) {
+  async function runScript(params: ToolRunParams) {
     if (!currentSessionId.value) return
+    isRunningScript.value = true
     runResult.value = null
-    const { data } = await axios.post(`/api/sessions/${currentSessionId.value}/run`, { params })
-    runResult.value = data
+    try {
+      const { data } = await axios.post(`/api/sessions/${currentSessionId.value}/run`, { params })
+      runResult.value = data
+    } finally {
+      isRunningScript.value = false
+    }
   }
 
   return {
@@ -410,6 +404,7 @@ export const useChatStore = defineStore('chat', () => {
     currentSessionId,
     currentSession,
     isStreaming,
+    isRunningScript,
     streamingText,
     reasoningText,
     uiSchema,

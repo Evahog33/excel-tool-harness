@@ -15,7 +15,7 @@
       </div>
 
       <div class="sandbox-body">
-        <FormRenderer :schema="store.uiSchema" @submit="handleRun" />
+        <FormRenderer :schema="store.uiSchema" :loading="store.isRunningScript" @submit="handleRun" />
       </div>
 
       <!-- 执行结果 -->
@@ -61,12 +61,12 @@
 </template>
 
 <script setup lang="ts">
-import { useChatStore } from '../stores/chat'
+import { useChatStore, type ToolRunParams } from '../stores/chat'
 import FormRenderer from './FormRenderer.vue'
 
 const store = useChatStore()
 
-async function handleRun(params: Record<string, string>) {
+async function handleRun(params: ToolRunParams) {
   await store.runScript(params)
 }
 

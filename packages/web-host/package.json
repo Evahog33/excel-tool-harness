@@ -12,7 +12,8 @@
     "ws": "^8.18.0",
     "@excel-harness/session": "workspace:*",
     "@excel-harness/agent-loop": "workspace:*",
-    "@excel-harness/excel-tool": "workspace:*"
+    "@excel-harness/excel-tool": "workspace:*",
+    "@excel-harness/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/koa": "^2.15.0",

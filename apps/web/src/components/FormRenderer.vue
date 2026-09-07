@@ -22,7 +22,7 @@
         <input
           :ref="(el) => { if (el) fileInputRefs[field.name] = el as HTMLInputElement }"
           type="file"
-          :accept="field.accept || '.xlsx,.xls,.csv'"
+          :accept="field.accept || '.xlsx,.csv'"
           class="file-input"
           :class="{ 'file-input--hidden': !!filePreviews[field.name] }"
           @change="onFileChange(field.name, $event)"
@@ -75,26 +75,35 @@
       />
     </div>
 
-    <button type="submit" class="btn-run" :disabled="isRunning || isAnyUploading">
-      {{ isRunning ? '⏳ 执行中…' : isAnyUploading ? '⏳ 等待文件上传…' : '▶ 执行' }}
+    <button type="submit" class="btn-run" :disabled="effectiveRunning || isAnyUploading">
+      {{ effectiveRunning ? '⏳ 正在执行 Python 工具…' : isAnyUploading ? '⏳ 等待文件上传…' : '▶ 执行' }}
     </button>
   </form>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted } from 'vue'
-import { useChatStore, type UiSchema } from '../stores/chat'
+import { useChatStore, type UiSchema, type ToolRunParams } from '../stores/chat'
 
-const props = defineProps<{ schema: UiSchema }>()
-const emit = defineEmits<{ submit: [params: Record<string, string>] }>()
+const props = withDefaults(
+  defineProps<{
+    schema: UiSchema
+    loading?: boolean
+  }>(),
+  {
+    loading: false,
+  },
+)
+const emit = defineEmits<{ submit: [params: ToolRunParams] }>()
 
 const store = useChatStore()
 const values = reactive<Record<string, any>>({})
 const filePreviews = reactive<Record<string, string>>({})
 const uploadingFields = reactive<Record<string, boolean>>({})
 const fileInputRefs = reactive<Record<string, HTMLInputElement>>({})
-const isRunning = ref(false)
+const runtimeUploadedPaths = new Set<string>()
 
+const effectiveRunning = computed(() => props.loading)
 const isAnyUploading = computed(() => Object.values(uploadingFields).some(Boolean))
 
 function getOptionValue(opt: any): string {
@@ -113,9 +122,17 @@ function getOptionLabel(opt: any): string {
 
 function initDefaults() {
   if (!props.schema?.fields) return
+  const validMountedPaths = new Set(store.excelFiles.map((f) => f.filepath))
   let fileIdx = 0
   for (const field of props.schema.fields) {
     if (field.type === 'file') {
+      const curr = values[field.name]
+      // 响应式失效守卫：若当前绑定的路径已不在已挂载列表中（且不是沙箱运行时上传），清空幽灵路径
+      if (curr && !validMountedPaths.has(curr) && !runtimeUploadedPaths.has(curr)) {
+        delete values[field.name]
+        delete filePreviews[field.name]
+      }
+
       if (!values[field.name]) {
         const mapped = store.excelFiles[fileIdx] || store.excelFiles[0]
         if (mapped) {
@@ -125,9 +142,11 @@ function initDefaults() {
         }
       }
     } else if (values[field.name] === undefined) {
-      if ((field as any).default !== undefined) {
+      if (field.type === 'checkbox') {
+        values[field.name] = Boolean((field as any).default ?? false)
+      } else if ((field as any).default !== undefined) {
         const def = (field as any).default
-        values[field.name] = typeof def === 'object' && def !== null ? getOptionValue(def) : String(def)
+        values[field.name] = typeof def === 'object' && def !== null ? getOptionValue(def) : (field.type === 'number' ? Number(def) : String(def))
       } else if (field.type === 'select' && field.options && field.options.length > 0) {
         values[field.name] = getOptionValue(field.options[0])
       }
@@ -143,32 +162,56 @@ function triggerFieldInput(fieldName: string) {
 }
 
 async function onFileChange(fieldName: string, event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0]
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
   if (!file) return
 
   uploadingFields[fieldName] = true
   try {
     const res = await store.uploadRuntimeFile(file)
     values[fieldName] = res.filepath
+    runtimeUploadedPaths.add(res.filepath)
     filePreviews[fieldName] = `${res.filename} (新上传文件)`
   } catch (err: any) {
     alert(`文件上传失败: ${err.message}`)
   } finally {
     uploadingFields[fieldName] = false
+    target.value = '' // 重置 input 确保重新选择同名同路径文件仍能触发变更
   }
 }
 
-async function handleSubmit() {
-  isRunning.value = true
-  try {
-    const params: Record<string, string> = {}
-    for (const [key, val] of Object.entries(values)) {
-      params[key] = String(val ?? '')
+function handleSubmit() {
+  // 1. 客户端前置必填校验（阻止文件或输入为空时静默提交）
+  if (props.schema?.fields) {
+    for (const field of props.schema.fields) {
+      if (field.required) {
+        const val = values[field.name]
+        if (val === undefined || val === null || val === '') {
+          alert(`请完善必填项: 「${field.label || field.name}」`)
+          return
+        }
+      }
     }
-    emit('submit', params)
-  } finally {
-    setTimeout(() => { isRunning.value = false }, 500)
   }
+
+  // 2. 类型保真序列化（保留 boolean / number / string 原生类型，杜绝 Python 端 bool("false") 翻转）
+  const params: ToolRunParams = {}
+  for (const field of props.schema?.fields || []) {
+    const rawVal = values[field.name]
+    if (rawVal === undefined || rawVal === null || rawVal === '') {
+      params[field.name] = null
+      continue
+    }
+    if (field.type === 'checkbox') {
+      params[field.name] = Boolean(rawVal)
+    } else if (field.type === 'number') {
+      const num = Number(rawVal)
+      params[field.name] = isNaN(num) ? rawVal : num
+    } else {
+      params[field.name] = String(rawVal)
+    }
+  }
+  emit('submit', params)
 }
 </script>
 

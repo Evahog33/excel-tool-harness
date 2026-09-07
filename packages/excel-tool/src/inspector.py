@@ -11,6 +11,7 @@ import sys
 import os
 import json
 import re
+import csv
 from typing import Dict, List, Any, Optional
 
 import openpyxl
@@ -191,9 +192,92 @@ def sniff_sensitive_column(col_name: str, samples: List[Any]) -> Optional[Dict[s
     return None
 
 
+def detect_csv_encoding(filepath: str) -> str:
+    """自动嗅探 CSV 编码（优先尝试 utf-8-sig、utf-8、gb18030、gbk 等）"""
+    for enc in ['utf-8-sig', 'utf-8', 'gb18030', 'gbk', 'big5', 'latin1']:
+        try:
+            with open(filepath, 'r', encoding=enc) as f:
+                f.read(8192)
+            return enc
+        except Exception:
+            continue
+    return 'utf-8'
+
+
+def inspect_csv(filepath: str, max_sample_rows: int = 15) -> Dict[str, Any]:
+    """检查 CSV 文件结构、推断表头并嗅探敏感字段"""
+    enc = detect_csv_encoding(filepath)
+    all_rows: List[List[str]] = []
+    with open(filepath, 'r', encoding=enc, errors='replace') as f:
+        reader = csv.reader(f)
+        for row in reader:
+            all_rows.append([str(c).strip() for c in row])
+
+    if not all_rows:
+        raise ValueError("CSV 文件为空")
+
+    scan_rows = min(10, len(all_rows))
+    matrix = all_rows[:scan_rows]
+    header_info = detect_headers(matrix)
+
+    headers = header_info["headers"]
+    header_end = header_info["header_end"]
+    total_rows = len(all_rows)
+    total_cols = len(headers)
+
+    data_start_row = header_end + 1
+    sample_rows = []
+    col_samples: Dict[str, List[Any]] = {h: [] for h in headers}
+
+    curr_row_idx = header_end
+    while curr_row_idx < total_rows and len(sample_rows) < max_sample_rows:
+        row_vals = all_rows[curr_row_idx]
+        row_dict = {}
+        has_content = False
+        for c_idx, h in enumerate(headers):
+            val_str = row_vals[c_idx] if c_idx < len(row_vals) else ""
+            if val_str:
+                has_content = True
+            row_dict[h] = val_str
+            col_samples[h].append(val_str)
+
+        if has_content:
+            sample_rows.append(row_dict)
+        curr_row_idx += 1
+
+    sensitive_columns = []
+    for h in headers:
+        detection = sniff_sensitive_column(h, col_samples.get(h, []))
+        if detection:
+            sensitive_columns.append(detection)
+
+    fname = os.path.basename(filepath)
+    sheet_name = os.path.splitext(fname)[0] or "CSV"
+
+    return {
+        "filename": fname,
+        "filepath": os.path.abspath(filepath),
+        "fileSizeBytes": os.path.getsize(filepath),
+        "sheets": [sheet_name],
+        "activeSheet": sheet_name,
+        "rowCount": max(0, total_rows - header_end),
+        "columnCount": total_cols,
+        "headerLevels": header_info["levels"],
+        "headerStartRow": header_info["header_start"],
+        "headerEndRow": header_info["header_end"],
+        "dataStartRow": data_start_row,
+        "headers": headers,
+        "sampleRows": sample_rows,
+        "sensitiveColumns": sensitive_columns,
+    }
+
+
 def inspect_excel(filepath: str, max_sample_rows: int = 15) -> Dict[str, Any]:
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"文件不存在: {filepath}")
+
+    if filepath.lower().endswith('.csv'):
+        return inspect_csv(filepath, max_sample_rows)
 
     wb = openpyxl.load_workbook(filepath, data_only=True)
     sheet_names = wb.sheetnames
@@ -261,6 +345,18 @@ def inspect_excel(filepath: str, max_sample_rows: int = 15) -> Dict[str, Any]:
 
 
 def main():
+    # 强制标准输出与标准错误使用 UTF-8 编码，防止 Windows 平台默认 GBK 代码页乱码
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
+    if hasattr(sys.stderr, 'reconfigure'):
+        try:
+            sys.stderr.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
+
     if len(sys.argv) < 2:
         print(json.dumps({"error": "缺少文件路径参数"}))
         sys.exit(1)

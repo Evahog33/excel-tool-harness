@@ -14,7 +14,11 @@
     "jsx": "preserve",
 
     /* Linting */
-    "strict": true
+    "strict": true,
+    "baseUrl": ".",
+    "paths": {
+      "@excel-harness/shared": ["../../packages/shared/src/index.ts"]
+    }
   },
   "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.tsx", "src/**/*.vue", "vite.config.ts"]
 }

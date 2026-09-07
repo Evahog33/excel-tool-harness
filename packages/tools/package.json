@@ -4,7 +4,6 @@
   "type": "module",
   "main": "src/index.ts",
   "dependencies": {
-    "cordis": "^3.18.1",
-    "zod": "^3.23.0"
+    "cordis": "^3.18.1"
   }
 }

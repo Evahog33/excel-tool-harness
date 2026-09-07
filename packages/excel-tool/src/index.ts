@@ -8,14 +8,26 @@
  */
 
 import { Context } from 'cordis'
-import { runPython, inspectExcel } from './python-runner'
-import type { UiSchema } from '@excel-harness/session'
+import { resolve, dirname, extname, join } from 'path'
+import { existsSync, mkdirSync } from 'fs'
+import { runPython, inspectExcel, checkPythonSyntax } from './python-runner.js'
+import type { UiSchema, ToolRunParams, ExcelMeta } from '@excel-harness/session'
 
-export { runPython, inspectExcel }
+export { runPython, inspectExcel, checkPythonSyntax }
 export type { ExcelInspectionResult, SensitiveColumnDetection, OutputFileInfo, RunPythonResult } from './python-runner'
 export * from './desensitizer'
 
 export const inject = ['tools', 'sessions']
+
+/** 辅助函数：剔除大模型在 Function Call 参数中偶尔包裹的外层 Markdown 围栏 */
+function stripMarkdownCodeBlock(str: string): string {
+  if (!str || typeof str !== 'string') return ''
+  return str
+    .trim()
+    .replace(/^```[a-zA-Z0-9_-]*\r?\n/, '')
+    .replace(/\r?\n```\s*$/, '')
+    .trim()
+}
 
 export function apply(ctx: Context) {
   ctx.inject(['tools', 'sessions'], (ctx) => {
@@ -58,9 +70,13 @@ export function apply(ctx: Context) {
         const latestSession = input.session_id ? ctx.sessions.get(input.session_id) : ctx.sessions.list()[0]
         if (!latestSession) return '❌ 未找到活动会话'
 
+        // 净化输入：剥离大模型偶尔添加的外层 ``` 代码围栏
+        const pythonCode = stripMarkdownCodeBlock(input.python_code)
+        const rawUiSchema = typeof input.ui_schema === 'string' ? stripMarkdownCodeBlock(input.ui_schema) : input.ui_schema
+
         let uiSchema: UiSchema
         try {
-          uiSchema = typeof input.ui_schema === 'string' ? JSON.parse(input.ui_schema) : (input.ui_schema as UiSchema)
+          uiSchema = typeof rawUiSchema === 'string' ? JSON.parse(rawUiSchema) : (rawUiSchema as UiSchema)
         } catch {
           return JSON.stringify({
             status: 'error',
@@ -69,83 +85,106 @@ export function apply(ctx: Context) {
         }
 
         // ── 自动化沙箱预检自测试 (Pre-flight Sandbox Run) ──
-        const testParams: Record<string, string> = {}
         const excelFiles = ctx.sessions.getExcelFiles(latestSession.id)
+        let testStdout = ''
+        let generatedFiles: string[] = []
 
-        // 预填测试参数：如果是 file 槽位，智能匹配当前会话已挂载的对应测试文件
-        if (uiSchema.fields) {
-          const usedFileIds = new Set<string>()
-          for (const field of uiSchema.fields) {
-            if (field.type === 'file') {
-              const fieldText = `${field.name} ${field.label || ''} ${field.description || ''}`.toLowerCase()
-              
-              // 1. 尝试通过文件名/字段描述关键词进行匹配
-              let matched = excelFiles.find(f => {
-                if (usedFileIds.has(f.fileId)) return false
-                const fname = f.filename.toLowerCase()
-                // 检查文件名关键词是否在字段描述中，或字段名在文件名中
-                return fieldText.includes(fname.replace(/\.[^/.]+$/, '')) || 
-                       fname.includes(field.name.toLowerCase())
-              })
-
-              // 2. 若未匹配，检查列名与字段文本的匹配度
-              if (!matched) {
-                matched = excelFiles.find(f => {
+        if (excelFiles.length > 0) {
+          // ── 模式 A: 挂载了真实数据源，进行真实沙箱试跑自测试 ──
+          const testParams: ToolRunParams = {}
+          if (uiSchema.fields) {
+            const usedFileIds = new Set<string>()
+            for (const field of uiSchema.fields) {
+              if (field.type === 'file') {
+                const fieldText = `${field.name} ${field.label || ''} ${field.description || ''}`.toLowerCase()
+                
+                // 1. 尝试通过文件名/字段描述关键词进行匹配
+                let matched = excelFiles.find(f => {
                   if (usedFileIds.has(f.fileId)) return false
-                  return f.headers.some(h => fieldText.includes(h.toLowerCase()))
+                  const fname = f.filename.toLowerCase()
+                  return fieldText.includes(fname.replace(/\.[^/.]+$/, '')) || 
+                         fname.includes(field.name.toLowerCase())
                 })
-              }
 
-              // 3. 兜底策略：取第一个未使用的文件，或第一个文件
-              if (!matched) {
-                matched = excelFiles.find(f => !usedFileIds.has(f.fileId)) || excelFiles[0]
-              }
+                // 2. 若未匹配，检查列名与字段文本的匹配度
+                if (!matched) {
+                  matched = excelFiles.find(f => {
+                    if (usedFileIds.has(f.fileId)) return false
+                    return f.headers.some(h => fieldText.includes(h.toLowerCase()))
+                  })
+                }
 
-              if (matched) {
-                usedFileIds.add(matched.fileId)
-                testParams[field.name] = matched.filepath
+                // 3. 兜底策略：取第一个未使用的文件，或第一个文件
+                if (!matched) {
+                  matched = excelFiles.find(f => !usedFileIds.has(f.fileId)) || excelFiles[0]
+                }
+
+                if (matched) {
+                  usedFileIds.add(matched.fileId)
+                  // 性能保障：对于超大文件采用微样本切片，几百毫秒内完成预检，防止 60s 超时死循环
+                  testParams[field.name] = await getOrCreatePreflightSamplePath(matched)
+                }
+              } else if ((field as any).default !== undefined) {
+                const def = (field as any).default
+                testParams[field.name] = typeof def === 'object' && def !== null ? (def.value ?? def.label ?? '') : def
+              } else if (field.type === 'select' && (field as any).options?.length) {
+                const firstOpt = (field as any).options[0]
+                testParams[field.name] = typeof firstOpt === 'object' && firstOpt !== null ? (firstOpt.value ?? firstOpt.label ?? '') : firstOpt
+              } else if (field.type === 'checkbox') {
+                testParams[field.name] = Boolean((field as any).default ?? false)
               }
-            } else if ((field as any).default !== undefined) {
-              const def = (field as any).default
-              testParams[field.name] = typeof def === 'object' && def !== null ? String(def.value ?? def.label ?? '') : String(def)
-            } else if (field.type === 'select' && (field as any).options?.length) {
-              const firstOpt = (field as any).options[0]
-              testParams[field.name] = typeof firstOpt === 'object' && firstOpt !== null ? String(firstOpt.value ?? firstOpt.label ?? '') : String(firstOpt)
             }
           }
-        }
 
-        ctx.logger('excel-tool').info('执行代码自动预检试运行...')
-        const testRun = await runPython({
-          code: input.python_code,
-          params: testParams,
-          pythonPath: process.env.PYTHON_PATH,
-        })
-
-        // 若预检运行失败，将错误 Traceback 直接反哺喂回 Agent Loop，由大模型自动纠错自愈！
-        if (!testRun.success) {
-          ctx.logger('excel-tool').warn(`代码预检试运行未通过: ${testRun.stderr}`)
-          return JSON.stringify({
-            status: 'error',
-            error: 'Python 代码自动预检运行失败',
-            stderr: testRun.stderr,
-            instruction: '请仔细阅读上方 Python 报错 Traceback（关注报错行号、KeyError、列名拼写、空值除零或缺失文件处理等），自我反思并修正 python_code 后重新调用 generate_excel_tool。'
+          ctx.logger('excel-tool').info('执行代码自动预检试运行 (真实数据源微样本)...')
+          const testRun = await runPython({
+            code: pythonCode,
+            params: testParams,
+            pythonPath: process.env.PYTHON_PATH,
+            isPreflight: true,
+            timeoutMs: 12_000,
           })
+
+          // 若预检运行失败，将错误 Traceback 直接反哺喂回 Agent Loop，由大模型自动纠错自愈！
+          if (!testRun.success) {
+            ctx.logger('excel-tool').warn(`代码预检试运行未通过: ${testRun.stderr}`)
+            return JSON.stringify({
+              status: 'error',
+              error: 'Python 代码自动预检运行失败',
+              stderr: testRun.stderr,
+              instruction: '请仔细阅读上方 Python 报错 Traceback（关注报错行号、KeyError、列名拼写、空值除零或缺失文件处理等），自我反思并修正 python_code 后重新调用 generate_excel_tool。'
+            })
+          }
+
+          testStdout = testRun.stdout.slice(0, 500)
+          generatedFiles = testRun.outputFiles?.map((f) => f.filename) || []
+        } else {
+          // ── 模式 B: 无挂载数据源，执行 Python 代码静态编译与语法检查，彻底杜绝假 Mock 数据引发 KeyError 死循环 ──
+          ctx.logger('excel-tool').info('当前会话无挂载数据源，执行 Python 静态语法编译检查...')
+          const syntaxCheck = await checkPythonSyntax(pythonCode, process.env.PYTHON_PATH)
+          if (!syntaxCheck.success) {
+            ctx.logger('excel-tool').warn(`代码静态语法检查未通过: ${syntaxCheck.stderr}`)
+            return JSON.stringify({
+              status: 'error',
+              error: 'Python 代码静态编译语法检查失败',
+              stderr: syntaxCheck.stderr,
+              instruction: '请仔细阅读上方 Python 语法报错（关注语法错误、缩进错误、未闭合符号等），修复后重新调用 generate_excel_tool。'
+            })
+          }
+          testStdout = 'Python 代码静态编译检查通过 (语法正确)'
         }
 
         // 预检通过！更新会话资产（Python 代码 + UI Schema）
         ctx.sessions.updateAssets(latestSession.id, {
-          pythonCode: input.python_code,
+          pythonCode,
           uiSchema,
         })
 
-        const generatedFiles = testRun.outputFiles?.map((f) => f.filename) || []
-
         return JSON.stringify({
           status: 'success',
-          message: `代码已成功通过沙箱预检测试！${input.summary}`,
+          message: `代码已成功通过预检测试！${input.summary}`,
           uiSchema,
-          testStdout: testRun.stdout.slice(0, 500),
+          testStdout,
           outputFiles: generatedFiles,
         })
       },
@@ -154,6 +193,7 @@ export function apply(ctx: Context) {
     // ── 工具2: run_excel_tool ───────────────────────────────────────────────
     ctx.tools.register({
       name: 'run_excel_tool',
+      internal: true,
       description:
         '（内部工具）在服务器端执行已生成的 Python 脚本。通常由右侧沙箱的"执行"按钮触发，而非 LLM 直接调用。',
       parameters: {
@@ -168,7 +208,7 @@ export function apply(ctx: Context) {
           required: false,
         },
       },
-      execute: async (input: { session_id: string; params?: Record<string, string> }) => {
+      execute: async (input: { session_id: string; params?: ToolRunParams }) => {
         const session = ctx.sessions.get(input.session_id)
         if (!session) return JSON.stringify({ error: '会话不存在' })
         if (!session.pythonCode) return JSON.stringify({ error: '该会话尚未生成 Python 脚本' })
@@ -191,4 +231,51 @@ export function apply(ctx: Context) {
 
     ctx.logger('excel-tool').info('Excel 工具已注册: generate_excel_tool, run_excel_tool (带预检自愈与产物扫描)')
   })
+}
+
+/** 为大文件生成轻量微样本供自动化预检，将测试时间压缩至几百毫秒，彻底规避 60s 超时死循环 */
+async function getOrCreatePreflightSamplePath(meta: ExcelMeta): Promise<string> {
+  // 数据量较小无需采样，直接使用原文件
+  if (meta.rowCount <= 150) return meta.filepath
+  const dir = dirname(meta.filepath)
+  const ext = extname(meta.filepath)
+  const samplePath = join(dir, `_preflight_${meta.fileId}${ext}`)
+  if (existsSync(samplePath)) return samplePath
+
+  try {
+    const isCsv = ext.toLowerCase() === '.csv'
+    const pyCode = [
+      'import pandas as pd',
+      `src = ${JSON.stringify(meta.filepath)}`,
+      `dst = ${JSON.stringify(samplePath)}`,
+      isCsv
+        ? 'df = pd.read_csv(src, nrows=80)'
+        : `df = pd.read_excel(src, nrows=80${meta.headerLevels > 1 ? `, header=list(range(${meta.headerLevels}))` : ''})`,
+      isCsv
+        ? 'df.to_csv(dst, index=False)'
+        : 'df.to_excel(dst, index=False)',
+    ].join('\n')
+    await runPython({ code: pyCode, isPreflight: true, timeoutMs: 10_000 })
+    if (existsSync(samplePath)) return samplePath
+  } catch {}
+  return meta.filepath
+}
+
+/** 为未挂载数据源的会话生成或获取轻量基础 Mock Excel 垫片文件 */
+async function getOrCreateMockExcelPath(): Promise<string> {
+  const mockDir = resolve('.sessions', 'mock')
+  if (!existsSync(mockDir)) mkdirSync(mockDir, { recursive: true })
+  const mockFile = resolve(mockDir, 'mock_sample.xlsx')
+  if (!existsSync(mockFile)) {
+    const pyCode = [
+      'import pandas as pd',
+      'df = pd.DataFrame([',
+      '    {"ID": "1001", "姓名": "张三", "部门": "技术部", "金额": 8500, "日期": "2026-01-01"},',
+      '    {"ID": "1002", "姓名": "李四", "部门": "市场部", "金额": 9200, "日期": "2026-01-02"},',
+      '])',
+      `df.to_excel(${JSON.stringify(mockFile)}, index=False)`,
+    ].join('\n')
+    await runPython({ code: pyCode })
+  }
+  return mockFile
 }

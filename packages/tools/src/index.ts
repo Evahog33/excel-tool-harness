@@ -5,7 +5,6 @@
  */
 
 import { Context, Service } from 'cordis'
-import { z } from 'zod'
 
 // ─── 类型定义 ─────────────────────────────────────────────────────────────────
 
@@ -21,6 +20,8 @@ export interface ToolParameter {
 export interface ToolDefinition<TInput = Record<string, unknown>> {
   name: string
   description: string
+  /** 是否为内部工具（内部工具不向大模型暴露 OpenAI Schema） */
+  internal?: boolean
   parameters: Record<string, ToolParameter>
   /** 执行函数 */
   execute: (input: TInput, ctx: Context) => Promise<string>
@@ -58,9 +59,11 @@ export class ToolRegistry extends Service {
     this.tools.delete(name)
   }
 
-  /** 获取所有工具的 OpenAI Function Calling 格式 schema */
+  /** 获取所有非内部工具的 OpenAI Function Calling 格式 schema */
   getOpenAIToolSchemas() {
-    return [...this.tools.values()].map((tool) => ({
+    return [...this.tools.values()]
+      .filter((tool) => !tool.internal)
+      .map((tool) => ({
       type: 'function' as const,
       function: {
         name: tool.name,

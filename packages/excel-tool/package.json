@@ -6,6 +6,7 @@
   "dependencies": {
     "cordis": "^3.18.1",
     "@excel-harness/tools": "workspace:*",
-    "@excel-harness/session": "workspace:*"
+    "@excel-harness/session": "workspace:*",
+    "@excel-harness/shared": "workspace:*"
   }
 }

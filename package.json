@@ -1,0 +1,24 @@
+{
+  "name": "excel-tool-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "concurrently -n \"server,web\" -c \"cyan,magenta\" \"tsx apps/server/src/index.ts\" \"pnpm --filter @excel-harness/web dev\"",
+    "dev:server": "tsx apps/server/src/index.ts",
+    "dev:web": "pnpm --filter @excel-harness/web dev",
+    "build": "tsc --noEmit",
+    "web:build": "pnpm --filter @excel-harness/web build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "concurrently": "^10.0.5",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

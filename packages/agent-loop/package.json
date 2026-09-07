@@ -1,0 +1,13 @@
+{
+  "name": "@excel-harness/agent-loop",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "cordis": "^3.18.1",
+    "@excel-harness/llm": "workspace:*",
+    "@excel-harness/session": "workspace:*",
+    "@excel-harness/tools": "workspace:*",
+    "openai": "^4.67.0"
+  }
+}

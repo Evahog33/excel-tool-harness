@@ -1,0 +1,16 @@
+{
+  "name": "@excel-harness/server",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "cordis": "^3.18.1",
+    "dotenv": "^16.4.0",
+    "@excel-harness/llm": "workspace:*",
+    "@excel-harness/session": "workspace:*",
+    "@excel-harness/tools": "workspace:*",
+    "@excel-harness/agent-loop": "workspace:*",
+    "@excel-harness/excel-tool": "workspace:*",
+    "@excel-harness/web-host": "workspace:*"
+  }
+}

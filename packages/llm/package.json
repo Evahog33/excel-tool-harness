@@ -1,0 +1,10 @@
+{
+  "name": "@excel-harness/llm",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "openai": "^4.67.0",
+    "cordis": "^3.18.1"
+  }
+}

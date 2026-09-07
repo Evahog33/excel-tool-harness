@@ -1,0 +1,9 @@
+{
+  "name": "@excel-harness/session",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "cordis": "^3.18.1"
+  }
+}

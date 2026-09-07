@@ -1,0 +1,22 @@
+{
+  "name": "@excel-harness/web-host",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "cordis": "^3.18.1",
+    "koa": "^2.15.0",
+    "@koa/router": "^12.0.0",
+    "@koa/cors": "^5.0.0",
+    "koa-body": "^6.0.0",
+    "ws": "^8.18.0",
+    "@excel-harness/session": "workspace:*",
+    "@excel-harness/agent-loop": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/koa": "^2.15.0",
+    "@types/koa__router": "^12.0.0",
+    "@types/koa__cors": "^5.0.0",
+    "@types/ws": "^8.5.0"
+  }
+}

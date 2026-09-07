@@ -1,7 +1,8 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { DEFAULT_PYTHON_CMD, runPython, inspectExcel, checkPythonSyntax } from '../python-runner.ts'
+import { DEFAULT_PYTHON_CMD, runPython, inspectExcel, checkPythonSyntax, compareExcelFiles } from '../python-runner.ts'
 import { writeFileSync, unlinkSync } from 'fs'
+
 import { resolve } from 'path'
 
 describe('Python Runner 与 Inspector 运行环境验证', () => {
@@ -85,6 +86,32 @@ describe('Python Runner 与 Inspector 运行环境验证', () => {
     if (result.outputDir) {
       const { existsSync } = await import('fs')
       assert.equal(existsSync(result.outputDir), false, 'isPreflight 结束后 outputDir 必须被静默销毁')
+    }
+  })
+
+  test('compareExcelFiles 对齐主键对比两个数据表并出具准确率报告', async () => {
+    const csv1 = resolve('.sessions', 'test_diff_out.csv')
+    const csv2 = resolve('.sessions', 'test_diff_bench.csv')
+    const content1 = '供应商名称,金额,负责人\n公司A,100,张三\n公司B,200,李四\n'
+    const content2 = '供应商名称,金额,负责人\n公司A,100,张三\n公司B,250,王五\n'
+    writeFileSync(csv1, content1, 'utf-8')
+    writeFileSync(csv2, content2, 'utf-8')
+    try {
+      const report = await compareExcelFiles(csv1, csv2)
+      assert.equal(report.success, true)
+      assert.equal(report.outputRowCount, 2)
+      assert.equal(report.benchmarkRowCount, 2)
+      assert.equal(report.commonColumns.length, 3)
+      const supStat = report.columnStats.find((c) => c.column === '供应商名称')
+      assert.equal(supStat?.matchRate, 100)
+      const amtStat = report.columnStats.find((c) => c.column === '金额')
+      assert.equal(amtStat?.matchRate, 50)
+      assert.equal(amtStat?.mismatchExamples.length, 1)
+      assert.equal(amtStat?.mismatchExamples[0].outputVal, 200)
+      assert.equal(amtStat?.mismatchExamples[0].benchmarkVal, 250)
+    } finally {
+      try { unlinkSync(csv1) } catch {}
+      try { unlinkSync(csv2) } catch {}
     }
   })
 })

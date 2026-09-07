@@ -255,6 +255,36 @@ export class SessionService extends Service<SessionServiceConfig> {
     this.ctx.emit('session/excel-meta-updated', { sessionId, excelMeta, excelFiles: session.excelFiles } as any)
   }
 
+  /** 获取会话挂载的预期标杆文件 */
+  getBenchmarkFile(sessionId: string): ExcelMeta | undefined {
+    const session = this.cache.get(sessionId)
+    return session?.benchmarkFile
+  }
+
+  /** 设置或更新会话的预期标杆文件 */
+  setBenchmarkFile(sessionId: string, benchmarkMeta?: ExcelMeta): ExcelMeta | undefined {
+    const session = this.cache.get(sessionId)
+    if (!session) throw new Error(`会话不存在: ${sessionId}`)
+    session.benchmarkFile = benchmarkMeta
+    session.updatedAt = Date.now()
+    this._persist(session)
+    this.ctx.emit('session/benchmark-updated', { sessionId, benchmarkFile: benchmarkMeta })
+    return session.benchmarkFile
+  }
+
+  /** 清除会话的预期标杆文件并删除物理文件 */
+  clearBenchmarkFile(sessionId: string): void {
+    const session = this.cache.get(sessionId)
+    if (!session) throw new Error(`会话不存在: ${sessionId}`)
+    if (session.benchmarkFile?.filepath && existsSync(session.benchmarkFile.filepath)) {
+      try { unlinkSync(session.benchmarkFile.filepath) } catch {}
+    }
+    session.benchmarkFile = undefined
+    session.updatedAt = Date.now()
+    this._persist(session)
+    this.ctx.emit('session/benchmark-updated', { sessionId, benchmarkFile: undefined })
+  }
+
   // ─── 私有方法 ───────────────────────────────────────────────────────────────
 
   private _ensureDir() {
@@ -311,6 +341,7 @@ declare module 'cordis' {
     'session/assets-updated': (data: { sessionId: string; uiSchema?: UiSchema; pythonCode?: string }) => void
     'session/excel-meta-updated': (data: { sessionId: string; excelMeta?: ExcelMeta; excelFiles?: ExcelMeta[] }) => void
     'session/messages-truncated': (data: { sessionId: string; remainingCount: number }) => void
+    'session/benchmark-updated': (data: { sessionId: string; benchmarkFile?: ExcelMeta }) => void
     'session/deleted': (data: { sessionId: string }) => void
   }
 }

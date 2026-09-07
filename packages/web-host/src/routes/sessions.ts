@@ -49,6 +49,7 @@ export function registerSessionRoutes(router: Router, ctx: Context) {
       pythonCode: session.pythonCode ?? null,
       excelMeta: excelFiles[0] ?? null,
       excelFiles,
+      benchmarkFile: session.benchmarkFile ?? null,
     }
   })
 

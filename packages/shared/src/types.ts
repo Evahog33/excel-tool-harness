@@ -99,6 +99,7 @@ export interface Session {
   messages: SessionMessage[]
   excelMeta?: ExcelMeta
   excelFiles?: ExcelMeta[]
+  benchmarkFile?: ExcelMeta
   uiSchema?: UiSchema
   pythonCode?: string
 }
@@ -116,3 +117,34 @@ export interface ToolExecutionResult {
   outputFiles?: OutputFileMeta[]
   error?: string
 }
+
+export interface MismatchExample {
+  rowIdx: number
+  keyValue?: string
+  outputVal: any
+  benchmarkVal: any
+}
+
+export interface ColumnDiffStat {
+  column: string
+  matchCount: number
+  totalCount: number
+  matchRate: number // 0 - 100
+  mismatchExamples: MismatchExample[]
+}
+
+export interface DiffReport {
+  success: boolean
+  outputFilename: string
+  benchmarkFilename: string
+  outputRowCount: number
+  benchmarkRowCount: number
+  commonColumns: string[]
+  missingColumns: string[] // 标杆有但产物缺少
+  extraColumns: string[] // 产物有但标杆没有
+  columnStats: ColumnDiffStat[]
+  overallMatchRate: number // 0 - 100
+  summaryText: string
+  error?: string
+}
+

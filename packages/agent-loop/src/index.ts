@@ -242,6 +242,13 @@ export class AgentLoop extends Service<AgentLoopConfig> {
       })
     }
 
+    if (session.benchmarkFile) {
+      history.push({
+        role: 'system',
+        content: this._formatBenchmarkContext(session.benchmarkFile),
+      })
+    }
+
     // 收集所有合法已存储的 tool 消息的 toolCallId
     const toolResponseIds = new Set<string>()
     for (const msg of session.messages) {
@@ -346,6 +353,31 @@ export class AgentLoop extends Service<AgentLoopConfig> {
     lines.push(`4. 右侧沙箱执行时，Python 将在用户本地沙箱对完整原始数据运行，输出保存到 OUTPUT_DIR。`)
     return lines.join('\n')
   }
+
+  private _formatBenchmarkContext(meta: ExcelMeta): string {
+    const lines: string[] = []
+    lines.push(`## 🎯 用户已挂载的预期标准结果标杆样本（Ground Truth Benchmark）`)
+    lines.push(`- 标杆文件名: ${meta.filename}`)
+    lines.push(`- 目标列结构 (${meta.columnCount} 列): ${meta.headers.join(' | ')}`)
+    lines.push(`- 标杆数据规模: 约 ${meta.rowCount} 行`)
+    lines.push(`- 表头层级: ${meta.headerLevels} 层表头结构 (数据起始行: 第 ${meta.dataStartRow} 行)`)
+
+    const samples = meta.sanitizedSamples?.slice(0, 5) || meta.sampleRows.slice(0, 5)
+    if (samples.length > 0) {
+      lines.push(`- 标杆样本数据 (前 ${samples.length} 行标准产物格式范例):`)
+      lines.push('| ' + meta.headers.join(' | ') + ' |')
+      lines.push('| ' + meta.headers.map(() => '---').join(' | ') + ' |')
+      for (const s of samples) {
+        lines.push('| ' + meta.headers.map((h) => String(s[h] ?? '').replace(/\n/g, ' ')).join(' | ') + ' |')
+      }
+    }
+
+    lines.push(`\n【核心约束与指导】：`)
+    lines.push(`1. 本标杆文件代表用户最终期望得到的产物标准格式与计算样本！生成的 Python 处理工具产出的 Excel，其【列名、列顺序、数值精度与空值处理】必须严格与此标杆对齐！`)
+    lines.push(`2. ⚠️ 极其重要：本标杆文件仅供设计、格式对齐与验收比对使用，切勿在 Python 代码中将其作为业务数据源去加载或合并！你的数据来源只能是用户上传的原材料数据源！`)
+    return lines.join('\n')
+  }
+
 
   private async _streamLlm(
     history: ChatCompletionMessageParam[],

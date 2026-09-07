@@ -14,6 +14,8 @@ import type {
   ToolExecutionResult,
   ToolRunParams,
   FormFieldValue,
+  DiffReport,
+  ColumnDiffStat,
 } from '@excel-harness/shared'
 
 export type Message = SessionMessage
@@ -28,6 +30,8 @@ export type {
   ToolExecutionResult,
   ToolRunParams,
   FormFieldValue,
+  DiffReport,
+  ColumnDiffStat,
 }
 
 export type Session = SharedSession
@@ -45,6 +49,11 @@ export const useChatStore = defineStore('chat', () => {
   const excelMeta = computed(() => excelFiles.value[0] || null)
   const isUploadingExcel = ref(false)
   const runResult = ref<ToolExecutionResult | null>(null)
+  const benchmarkFile = ref<ExcelMeta | null>(null)
+  const isUploadingBenchmark = ref(false)
+  const isComparingBenchmark = ref(false)
+  const diffReport = ref<DiffReport | null>(null)
+
 
   const currentSession = computed(() =>
     sessions.value.find((s) => s.id === currentSessionId.value) ?? null,
@@ -79,6 +88,8 @@ export const useChatStore = defineStore('chat', () => {
         pythonCode.value = null
         excelFiles.value = []
         runResult.value = null
+        benchmarkFile.value = null
+        diffReport.value = null
       }
     }
   }
@@ -87,6 +98,7 @@ export const useChatStore = defineStore('chat', () => {
   async function selectSession(id: string) {
     currentSessionId.value = id
     runResult.value = null
+    diffReport.value = null
 
     // 优先从 sessions 列表中获取本地已有数据
     const session = sessions.value.find((s) => s.id === id)
@@ -94,6 +106,7 @@ export const useChatStore = defineStore('chat', () => {
       uiSchema.value = session.uiSchema ?? null
       pythonCode.value = session.pythonCode ?? null
       excelFiles.value = session.excelFiles || (session.excelMeta ? [session.excelMeta] : [])
+      benchmarkFile.value = session.benchmarkFile ?? null
     }
 
     // 后台拉取最新资产全量同步
@@ -101,6 +114,7 @@ export const useChatStore = defineStore('chat', () => {
       const { data } = await axios.get(`/api/sessions/${id}/assets`)
       uiSchema.value = data.uiSchema
       pythonCode.value = data.pythonCode
+      benchmarkFile.value = data.benchmarkFile ?? null
       if (data.excelFiles && Array.isArray(data.excelFiles)) {
         excelFiles.value = data.excelFiles
       } else if (data.excelMeta) {
@@ -197,6 +211,80 @@ export const useChatStore = defineStore('chat', () => {
     }
     return data
   }
+
+  /** 上传预期标杆 Excel (Ground Truth) */
+  async function uploadBenchmark(file: File) {
+    if (!currentSessionId.value) return
+    isUploadingBenchmark.value = true
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      const { data } = await axios.post(
+        `/api/sessions/${currentSessionId.value}/upload-benchmark`,
+        formData,
+        { headers: { 'Content-Type': 'multipart/form-data' } },
+      )
+      if (data.ok) {
+        benchmarkFile.value = data.benchmarkFile
+        const session = sessions.value.find((s) => s.id === currentSessionId.value)
+        if (session) {
+          session.benchmarkFile = data.benchmarkFile
+        }
+      }
+      return data
+    } finally {
+      isUploadingBenchmark.value = false
+    }
+  }
+
+  /** 移除已挂载的预期标杆文件 */
+  async function removeBenchmark() {
+    if (!currentSessionId.value) return
+    const { data } = await axios.delete(`/api/sessions/${currentSessionId.value}/benchmark`)
+    if (data.ok) {
+      benchmarkFile.value = null
+      diffReport.value = null
+      const session = sessions.value.find((s) => s.id === currentSessionId.value)
+      if (session) {
+        session.benchmarkFile = undefined
+      }
+    }
+    return data
+  }
+
+  /** 执行产物与标杆对比 (Diff 对账) */
+  async function compareBenchmark(outputFilepath?: string): Promise<DiffReport | undefined> {
+    if (!currentSessionId.value) return
+    let targetPath = outputFilepath
+    if (!targetPath) {
+      const outputs = runResult.value?.outputFiles
+      if (outputs && outputs.length > 0) {
+        targetPath = outputs[0].filepath
+      }
+    }
+    if (!targetPath) {
+      throw new Error('未找到生成的输出产物，请先运行工具生成产物')
+    }
+
+    isComparingBenchmark.value = true
+    try {
+      const { data } = await axios.post(
+        `/api/sessions/${currentSessionId.value}/compare-benchmark`,
+        { outputFilepath: targetPath },
+      )
+      if (data.ok) {
+        diffReport.value = data.diff
+      }
+      return data.diff
+    } finally {
+      isComparingBenchmark.value = false
+    }
+  }
+
+  function clearDiffReport() {
+    diffReport.value = null
+  }
+
 
   let activeAbortController: AbortController | null = null
   const wasAborted = ref(false)
@@ -413,6 +501,10 @@ export const useChatStore = defineStore('chat', () => {
     excelFiles,
     isUploadingExcel,
     runResult,
+    benchmarkFile,
+    isUploadingBenchmark,
+    isComparingBenchmark,
+    diffReport,
     loadSessions,
     createSession,
     deleteSession,
@@ -421,6 +513,10 @@ export const useChatStore = defineStore('chat', () => {
     saveDesensitizeConfig,
     removeExcelFile,
     removeExcel,
+    uploadBenchmark,
+    removeBenchmark,
+    compareBenchmark,
+    clearDiffReport,
     sendMessage,
     stopGeneration,
     popLastMessage,

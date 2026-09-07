@@ -107,6 +107,49 @@
       </div>
     </div>
 
+    <!-- 预期标杆 Excel 挂载区 (Ground Truth) -->
+    <div class="dock-benchmark-section">
+      <input
+        ref="benchmarkInputRef"
+        type="file"
+        accept=".xlsx,.csv,.xls"
+        class="file-input-hidden"
+        @change="handleBenchmarkSelect"
+      />
+      <!-- 未上传标杆 -->
+      <div v-if="!store.benchmarkFile" class="benchmark-bar-empty">
+        <div class="benchmark-hint-left">
+          <span class="benchmark-icon">🎯</span>
+          <span class="benchmark-label">预期结果标杆 (选填)：</span>
+          <span class="benchmark-desc">上传标准结果样本，AI 将严格按其列结构与口径生成工具，并在沙箱提供秒级对账验收</span>
+        </div>
+        <button class="btn-upload-benchmark" :disabled="store.isUploadingBenchmark" @click="triggerBenchmarkInput">
+          {{ store.isUploadingBenchmark ? '⏳ 解析标杆中…' : '＋ 上传标杆 Excel 验证' }}
+        </button>
+      </div>
+      <!-- 已挂载标杆 -->
+      <div v-else class="benchmark-card">
+        <div class="benchmark-card-left">
+          <div class="benchmark-badge">🎯 预期标杆样本</div>
+          <div class="benchmark-info">
+            <span class="benchmark-name" :title="store.benchmarkFile.filename">{{ store.benchmarkFile.filename }}</span>
+            <span class="benchmark-meta">
+              {{ store.benchmarkFile.columnCount }} 列结构 · 约 {{ store.benchmarkFile.rowCount }} 行标准数据 (仅作验收对账，不作为输入源)
+            </span>
+          </div>
+        </div>
+        <div class="benchmark-card-actions">
+          <button class="benchmark-action-btn" title="重新上传替换标杆" @click="triggerBenchmarkInput">
+            🔄 替换标杆
+          </button>
+          <button class="benchmark-action-btn btn-remove" title="移除此标杆文件" @click="handleRemoveBenchmark">
+            ✕ 移除
+          </button>
+        </div>
+      </div>
+    </div>
+
+
     <!-- 脱敏配置弹窗 -->
     <DesensitizeModal
       v-if="activeModalMeta"
@@ -161,6 +204,32 @@ function getUnprotectedSensitiveCount(file: ExcelMeta) {
 
 function triggerFileInput() {
   fileInputRef.value?.click()
+}
+
+const benchmarkInputRef = ref<HTMLInputElement | null>(null)
+
+function triggerBenchmarkInput() {
+  benchmarkInputRef.value?.click()
+}
+
+async function handleBenchmarkSelect(e: Event) {
+  const target = e.target as HTMLInputElement
+  const file = target.files?.[0]
+  if (!file) return
+  try {
+    await store.uploadBenchmark(file)
+  } catch (err: any) {
+    alert(`上传标杆文件失败: ${err.message}`)
+  } finally {
+    target.value = ''
+    if (benchmarkInputRef.value) benchmarkInputRef.value.value = ''
+  }
+}
+
+async function handleRemoveBenchmark() {
+  if (confirm(`确认移除标杆文件「${store.benchmarkFile?.filename}」吗？`)) {
+    await store.removeBenchmark()
+  }
 }
 
 async function handleFileSelect(e: Event) {
@@ -596,4 +665,134 @@ const generatedPromptText = computed(() => {
   font-weight: 600;
 }
 .btn-secondary:hover { background: #cbd5e1; }
+
+/* ── 预期标杆挂载区样式 ── */
+.dock-benchmark-section {
+  margin-top: 8px;
+}
+
+.benchmark-bar-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: #f5f3ff;
+  border: 1px dashed #c4b5fd;
+  border-radius: 8px;
+  gap: 12px;
+}
+
+.benchmark-hint-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.benchmark-icon {
+  font-size: 14px;
+}
+
+.benchmark-label {
+  font-weight: 700;
+  color: #6d28d9;
+}
+
+.benchmark-desc {
+  color: #7c3aed;
+  opacity: 0.85;
+}
+
+.btn-upload-benchmark {
+  flex-shrink: 0;
+  background: #7c3aed;
+  color: #ffffff;
+  border: none;
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.btn-upload-benchmark:hover {
+  background: #6d28d9;
+}
+
+.benchmark-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: #faf5ff;
+  border: 1px solid #d8b4fe;
+  border-radius: 8px;
+}
+
+.benchmark-card-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.benchmark-badge {
+  font-size: 11px;
+  font-weight: 700;
+  background: #ede9fe;
+  color: #6d28d9;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid #ddd6fe;
+}
+
+.benchmark-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.benchmark-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #4c1d95;
+}
+
+.benchmark-meta {
+  font-size: 11px;
+  color: #7c3aed;
+}
+
+.benchmark-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.benchmark-action-btn {
+  background: #ffffff;
+  border: 1px solid #c4b5fd;
+  color: #6d28d9;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.benchmark-action-btn:hover {
+  background: #f5f3ff;
+  border-color: #a78bfa;
+}
+
+.benchmark-action-btn.btn-remove {
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+
+.benchmark-action-btn.btn-remove:hover {
+  background: #fef2f2;
+  border-color: #fca5a5;
+}
 </style>

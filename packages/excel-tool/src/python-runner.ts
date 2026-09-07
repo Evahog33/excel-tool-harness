@@ -332,3 +332,30 @@ export async function checkPythonSyntax(
     child.stdin.end()
   })
 }
+
+const DIFF_SCRIPT_PATH = resolve(fileURLToPath(import.meta.url), '../diff_excel.py')
+
+/** 对比生成产物与预期标杆文件，出具对账 DiffReport */
+export async function compareExcelFiles(
+  outputPath: string,
+  benchmarkPath: string,
+  pythonPath = process.env.PYTHON_PATH ?? DEFAULT_PYTHON_CMD,
+): Promise<import('@excel-harness/shared').DiffReport> {
+  const { stdout, stderr } = await execFileAsync(pythonPath, [DIFF_SCRIPT_PATH, outputPath, benchmarkPath], {
+    timeout: 30_000,
+    encoding: 'utf-8',
+    maxBuffer: 10 * 1024 * 1024,
+  })
+
+  if (!stdout.trim()) {
+    throw new Error(stderr || 'Diff 对比脚本未产生输出')
+  }
+
+  const res = JSON.parse(stdout)
+  if (!res.success) {
+    throw new Error(res.error || 'Excel 对账对比失败')
+  }
+
+  return res as import('@excel-harness/shared').DiffReport
+}
+

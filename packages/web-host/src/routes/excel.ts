@@ -3,8 +3,9 @@ import type { Context } from 'cordis'
 import { existsSync, mkdirSync, copyFileSync } from 'fs'
 import { resolve, extname } from 'path'
 import { randomUUID } from 'crypto'
-import { inspectExcel, sanitizeSampleRows } from '@excel-harness/excel-tool'
+import { inspectExcel, sanitizeSampleRows, compareExcelFiles } from '@excel-harness/excel-tool'
 import type { ExcelMeta, DesensitizationRuleConfig } from '@excel-harness/shared'
+
 
 const ALLOWED_EXCEL_EXTS = new Set(['.xlsx', '.csv'])
 
@@ -206,4 +207,114 @@ export function registerExcelRoutes(router: Router, ctx: Context) {
     ctx.sessions.clearExcelFiles(session.id)
     koaCtx.body = { ok: true, excelFiles: [], excelMeta: null }
   })
+
+  // 上传并解析预期标杆 Excel (Ground Truth)
+  router.post('/api/sessions/:id/upload-benchmark', async (koaCtx) => {
+    const session = ctx.sessions.get(koaCtx.params.id)
+    if (!session) {
+      koaCtx.status = 404
+      koaCtx.body = { error: '会话不存在' }
+      return
+    }
+
+    const rawFile = (koaCtx.request.files as any)?.file
+    if (!rawFile) {
+      koaCtx.status = 400
+      koaCtx.body = { error: '未接收到标杆文件' }
+      return
+    }
+
+    const file = Array.isArray(rawFile) ? rawFile[0] : rawFile
+    const originalName = file.originalFilename || file.newFilename || 'benchmark.xlsx'
+    const ext = extname(originalName).toLowerCase()
+    if (!ALLOWED_EXCEL_EXTS.has(ext) && ext !== '.xls') {
+      koaCtx.status = 400
+      koaCtx.body = { error: `不支持的文件格式: ${ext}，仅支持 .xlsx, .csv 或 .xls` }
+      return
+    }
+
+    const uploadDir = resolve('.sessions', session.id, 'uploads')
+    if (!existsSync(uploadDir)) {
+      mkdirSync(uploadDir, { recursive: true })
+    }
+
+    const fileId = randomUUID()
+    const targetPath = resolve(uploadDir, `${fileId}_benchmark_${originalName}`)
+    const tempPath = file.filepath || file.path
+    copyFileSync(tempPath, targetPath)
+
+    try {
+      const inspection = await inspectExcel(targetPath)
+      const benchmarkMeta: ExcelMeta = {
+        fileId,
+        filename: originalName,
+        filepath: targetPath,
+        fileSizeBytes: file.size ?? 0,
+        uploadedAt: Date.now(),
+        sheets: inspection.sheets,
+        activeSheet: inspection.activeSheet,
+        rowCount: inspection.rowCount,
+        columnCount: inspection.columnCount,
+        headerLevels: inspection.headerLevels,
+        headerStartRow: inspection.headerStartRow,
+        headerEndRow: inspection.headerEndRow,
+        dataStartRow: inspection.dataStartRow,
+        headers: inspection.headers,
+        sampleRows: inspection.sampleRows,
+        sensitiveColumns: [],
+      }
+
+      ctx.sessions.setBenchmarkFile(session.id, benchmarkMeta)
+      koaCtx.body = { ok: true, benchmarkFile: benchmarkMeta }
+    } catch (err: any) {
+      koaCtx.status = 500
+      koaCtx.body = { ok: false, error: `标杆文件解析失败: ${err.message}` }
+    }
+  })
+
+  // 删除已挂载的标杆文件
+  router.delete('/api/sessions/:id/benchmark', async (koaCtx) => {
+    const session = ctx.sessions.get(koaCtx.params.id)
+    if (!session) {
+      koaCtx.status = 404
+      koaCtx.body = { error: '会话不存在' }
+      return
+    }
+
+    ctx.sessions.clearBenchmarkFile(session.id)
+    koaCtx.body = { ok: true }
+  })
+
+  // 执行产物与标杆文件的验收对比 (Diff 对账)
+  router.post('/api/sessions/:id/compare-benchmark', async (koaCtx) => {
+    const session = ctx.sessions.get(koaCtx.params.id)
+    if (!session) {
+      koaCtx.status = 404
+      koaCtx.body = { error: '会话不存在' }
+      return
+    }
+
+    const benchmark = session.benchmarkFile
+    if (!benchmark || !benchmark.filepath || !existsSync(benchmark.filepath)) {
+      koaCtx.status = 400
+      koaCtx.body = { error: '当前会话未挂载预期标杆文件，请先上传标杆 Excel' }
+      return
+    }
+
+    const { outputFilepath } = (koaCtx.request.body as any) ?? {}
+    if (!outputFilepath || !existsSync(outputFilepath)) {
+      koaCtx.status = 400
+      koaCtx.body = { error: '未找到待对比的输出产物文件，请先运行工具生成产物' }
+      return
+    }
+
+    try {
+      const diff = await compareExcelFiles(outputFilepath, benchmark.filepath, process.env.PYTHON_PATH)
+      koaCtx.body = { ok: true, diff }
+    } catch (err: any) {
+      koaCtx.status = 500
+      koaCtx.body = { ok: false, error: `标杆对账比对失败: ${err.message}` }
+    }
+  })
 }
+

@@ -10,11 +10,12 @@
 import { Context } from 'cordis'
 import { resolve, dirname, extname, join } from 'path'
 import { existsSync, mkdirSync } from 'fs'
-import { runPython, inspectExcel, checkPythonSyntax } from './python-runner.js'
+import { runPython, inspectExcel, checkPythonSyntax, compareExcelFiles } from './python-runner.js'
 import type { UiSchema, ToolRunParams, ExcelMeta } from '@excel-harness/session'
 
-export { runPython, inspectExcel, checkPythonSyntax }
+export { runPython, inspectExcel, checkPythonSyntax, compareExcelFiles }
 export type { ExcelInspectionResult, SensitiveColumnDetection, OutputFileInfo, RunPythonResult } from './python-runner'
+
 export * from './desensitizer'
 
 export const inject = ['tools', 'sessions']
@@ -158,6 +159,23 @@ export function apply(ctx: Context) {
 
           testStdout = testRun.stdout.slice(0, 500)
           generatedFiles = testRun.outputFiles?.map((f) => f.filename) || []
+
+          // 若会话挂载了标杆文件，进行自动标杆验收比对并出具简要指标
+          let benchmarkNotice = ''
+          if (latestSession.benchmarkFile && testRun.outputFiles && testRun.outputFiles.length > 0) {
+            try {
+              const diff = await compareExcelFiles(
+                testRun.outputFiles[0].filepath,
+                latestSession.benchmarkFile.filepath,
+                process.env.PYTHON_PATH,
+              )
+              benchmarkNotice = `\n[标杆验收自动比对] 整体匹配率: ${diff.overallMatchRate}%。${diff.summaryText}`
+            } catch (diffErr: any) {
+              ctx.logger('excel-tool').warn('预检标杆比对失败:', diffErr)
+            }
+          }
+
+          testStdout = (testStdout + benchmarkNotice).trim()
         } else {
           // ── 模式 B: 无挂载数据源，执行 Python 代码静态编译与语法检查，彻底杜绝假 Mock 数据引发 KeyError 死循环 ──
           ctx.logger('excel-tool').info('当前会话无挂载数据源，执行 Python 静态语法编译检查...')

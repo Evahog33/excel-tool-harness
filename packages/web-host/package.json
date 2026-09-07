@@ -11,7 +11,8 @@
     "koa-body": "^6.0.0",
     "ws": "^8.18.0",
     "@excel-harness/session": "workspace:*",
-    "@excel-harness/agent-loop": "workspace:*"
+    "@excel-harness/agent-loop": "workspace:*",
+    "@excel-harness/excel-tool": "workspace:*"
   },
   "devDependencies": {
     "@types/koa": "^2.15.0",

@@ -13,8 +13,17 @@
           :class="['session-item', { active: s.id === store.currentSessionId }]"
           @click="store.selectSession(s.id)"
         >
-          <span class="session-title">{{ s.title }}</span>
-          <span class="session-time">{{ formatDate(s.updatedAt) }}</span>
+          <div class="session-info">
+            <span class="session-title" :title="s.title">{{ s.title }}</span>
+            <span class="session-time">{{ formatDate(s.updatedAt) }}</span>
+          </div>
+          <button
+            class="btn-delete-session"
+            title="删除此会话"
+            @click.stop="confirmDelete(s.id, s.title)"
+          >
+            🗑
+          </button>
         </li>
       </ul>
     </aside>
@@ -43,6 +52,12 @@ onMounted(() => store.loadSessions())
 
 function formatDate(ts: number) {
   return new Date(ts).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
+}
+
+async function confirmDelete(id: string, title: string) {
+  if (window.confirm(`确定要删除对话「${title}」及其所有相关数据吗？`)) {
+    await store.deleteSession(id)
+  }
 }
 </script>
 
@@ -80,15 +95,46 @@ function formatDate(ts: number) {
 .btn-new:hover { background: #4338ca; }
 .session-list { flex: 1; overflow-y: auto; padding: 8px 0; list-style: none; }
 .session-item {
-  padding: 10px 14px;
+  padding: 10px 12px;
   cursor: pointer;
   border-left: 3px solid transparent;
   transition: background 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 .session-item:hover { background: #2a2a4e; }
 .session-item.active { background: #2a2a4e; border-left-color: #4f46e5; }
+.session-info {
+  flex: 1;
+  min-width: 0;
+}
 .session-title { display: block; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-time { font-size: 11px; color: #888; }
+.btn-delete-session {
+  background: transparent;
+  border: none;
+  color: #666;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.session-item:hover .btn-delete-session {
+  opacity: 1;
+  color: #a0a0b0;
+}
+.btn-delete-session:hover {
+  color: #ef4444 !important;
+  background: rgba(239, 68, 68, 0.15);
+}
 .chat-panel { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .sandbox-panel { width: 420px; border-left: 1px solid #e0e0e0; background: #fff; flex-shrink: 0; }
 </style>

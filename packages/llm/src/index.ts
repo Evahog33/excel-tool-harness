@@ -36,15 +36,20 @@ export class LlmService extends Service {
   async *stream(
     messages: ChatCompletionMessageParam[],
     tools?: ChatCompletionTool[],
+    signal?: AbortSignal,
   ) {
-    const response = await this.client.chat.completions.create({
-      model: this.model,
-      messages,
-      tools: tools?.length ? tools : undefined,
-      tool_choice: tools?.length ? 'auto' : undefined,
-      stream: true,
-    })
+    const response = await this.client.chat.completions.create(
+      {
+        model: this.model,
+        messages,
+        tools: tools?.length ? tools : undefined,
+        tool_choice: tools?.length ? 'auto' : undefined,
+        stream: true,
+      },
+      { signal },
+    )
     for await (const chunk of response) {
+      if (signal?.aborted) break
       yield chunk
     }
   }
@@ -53,14 +58,18 @@ export class LlmService extends Service {
   async complete(
     messages: ChatCompletionMessageParam[],
     tools?: ChatCompletionTool[],
+    signal?: AbortSignal,
   ) {
-    return this.client.chat.completions.create({
-      model: this.model,
-      messages,
-      tools: tools?.length ? tools : undefined,
-      tool_choice: tools?.length ? 'auto' : undefined,
-      stream: false,
-    })
+    return this.client.chat.completions.create(
+      {
+        model: this.model,
+        messages,
+        tools: tools?.length ? tools : undefined,
+        tool_choice: tools?.length ? 'auto' : undefined,
+        stream: false,
+      },
+      { signal },
+    )
   }
 }
 

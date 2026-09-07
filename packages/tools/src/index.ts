@@ -38,6 +38,7 @@ export interface ToolResult {
 
 export class ToolRegistry extends Service {
   static [Service.provide] = 'tools'
+  static inject = ['sessions']
 
   private tools = new Map<string, ToolDefinition>()
 

@@ -92,3 +92,11 @@
   - [ ] 专家/边缘任务（13-20）：含合并单元格表头还原、跨 Sheet 复杂公式对账、缺失值智能填补、大表格性能极限处理
 - [ ] **Task 4.3: 建立 CI 门禁与历史跑分记录看板**
   - [ ] 每次提示词修改或模型选型切换时，一键比对前后 Score 变化
+
+---
+
+## 🔗 后续演进文档索引
+
+- [已知问题与潜在风险清单 (Known Issues & Risks)](file:///Users/777hoog/Desktop/work/mine5/agent/excel-tool-harness/docs/known_issues.md)
+- [二期演进规划路线图 (Phase 2 Roadmap)](file:///Users/777hoog/Desktop/work/mine5/agent/excel-tool-harness/docs/phase2_roadmap.md)
+

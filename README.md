@@ -1,87 +1,100 @@
-# Excel Tool Harness
+# ⚡ Excel Tool Harness
 
-> 基于 [Cordis](https://github.com/cordiverse/cordis) 框架构建的本地化 Excel 智能处理工作站。
-> 参考 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 架构设计。
+> 基于 [Cordis](https://github.com/cordiverse/cordis) 框架构建的本地化 Excel 智能处理工作站。  
+> 遵循 **"Agent as a Tool Maker"** 理念：大模型不直接触碰海量真实数据，而是按需编写、组装高可靠的专用 Python 工具与交互界面。
 
-## 核心理念
+---
 
-**"Agent as a Tool Maker"** —— 大模型不直接处理数据，而是为你生成专用的处理工具。
+## 💡 核心亮点
 
-- **左侧**：与 AI 对话，描述 Excel 处理需求
-- **右侧**：AI 生成的工具沙箱，独立离线执行，不依赖大模型
+- 🖥️ **双屏协同架构**：左侧与 AI 自然语言对话、推理流可视化；右侧独立动态表单沙箱，离线执行纯本地算力。
+- 🛡️ **本地隐私与智能脱敏**：内置敏感字段识别（身份证/手机/邮箱/银行卡等），大模型仅接触脱敏后的微样本，原始数据不出域。
+- 🔄 **沙箱预检与自愈闭环**：代码生成后自动后台微样本试跑；遇异常自动捕获 Traceback 反哺大模型反思修正，直至可执行。
+- 🔒 **防篡改快照与安全隔离**：写前记录 SHA-256 指纹与冷备份，强制输出至隔离目录；拦截对原输入文件的非法改写并秒级自愈还原。
+- 🩺 **出厂回读质检门禁**：基于规则引擎对产物执行无损加载、维度对账、崩溃单元格（`#REF!`, `#DIV/0!` 等）扫描，出具健康体检报告。
+- 📊 **标杆对账与样表核验**：支持挂载预期标杆表或蓝图模板，自动比对结构契约与数据精度，可视化呈现匹配率与差异。
+- 📚 **领域 Playbook 知识注入**：内置 7 大 Excel 核心场景指南（清洗、合并、填充、合并单元格、公式缓存、流式处理等），按意图动态装载。
+- 🏆 **20 任务自动化评测集**：覆盖基础通路、数据清洗、生成对账、脏文件压力与诚实性 5 大梯度，全自动化大考与回归基准。
 
-## 项目结构
+---
 
-```
+## 🏗️ 项目架构
+
+```text
 excel-tool-harness/
 ├── apps/
-│   ├── server/           # 服务入口（Cordis Context 启动点）
-│   └── web/              # Vue 3 前端（双屏布局）
-│       └── src/
-│           ├── components/ChatPanel.vue      # 左侧对话区
-│           ├── components/ToolSandbox.vue    # 右侧沙箱
-│           └── components/FormRenderer.vue  # JSON Schema → 表单渲染
-└── packages/
-    ├── llm/              # LLM 服务插件（DeepSeek API 适配器）
-    ├── session/          # 会话管理插件（append-only 日志）
-    ├── tools/            # 工具注册表插件
-    ├── agent-loop/       # Agent 驱动循环插件
-    ├── excel-tool/       # Excel 专属工具插件（核心业务）
-    │   └── templates/    # Python 执行引擎模板
-    └── web-host/         # Web 宿主插件（Koa + SSE）
+│   ├── server/               # 服务入口（Cordis 微内核插件编排）
+│   └── web/                  # Vue 3 前端（双屏交互、DataDock、质检看板、Diff视图）
+├── packages/
+│   ├── llm/                  # LLM 适配器插件（DeepSeek / OpenAI 兼容协议，支持推理流）
+│   ├── session/              # 会话状态管理（Append-only 持久化）
+│   ├── tools/                # 工具注册表（生命周期与拦截钩子）
+│   ├── agent-loop/           # Agent 驱动循环与 Playbook 动态注入
+│   ├── excel-tool/           # Excel 核心业务（Python 执行器、质检、脱敏、对账）
+│   ├── shared/               # 共享类型定义与脱敏算法
+│   └── web-host/             # Koa 宿主服务（REST API + SSE 流式推送 + 安全防穿越）
+├── templates/playbooks/      # 7 大领域场景 Playbook 知识库
+└── evals/                    # 20 任务评估数据集、验证用例与金标准评测引擎
 ```
 
-## 快速开始
+---
 
-### 1. 环境要求
+## 🚀 快速开始
 
-- Node.js >= 22
-- pnpm >= 9（`corepack enable`）
-- Python >= 3.10 + `pandas` + `openpyxl`
+### 1. 环境准备
+
+- **Node.js** >= 22
+- **pnpm** >= 9
+- **Python** >= 3.10（需安装基础数据分析库）：
 
 ```bash
 pip install pandas openpyxl
 ```
 
-### 2. 配置
+### 2. 配置环境变量
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填写你的 DEEPSEEK_API_KEY
+# 编辑 .env，填写 DEEPSEEK_API_KEY
 ```
 
-### 3. 安装依赖
+### 3. 安装依赖与启动
 
 ```bash
 pnpm install
-```
 
-### 4. 启动服务（一键前后端同启）
-
-```bash
+# 一键同时拉起前后端
 pnpm dev
-# 同时拉起前后端：
-# 后端 API : http://127.0.0.1:3080
-# 前端页面 : http://localhost:5173
 ```
 
-> 若需单独启动：
+- **前端界面**：`http://localhost:5173`
+- **后端服务**：`http://127.0.0.1:3080`
+
+> 也可以单独启动：
 > - 仅后端：`pnpm dev:server`
 > - 仅前端：`pnpm dev:web`
 
-## 架构说明
+---
 
-本项目沿用 dsh 的 **Cordis 插件架构**：
+## 🧪 测试与评测
 
-| 概念 | 本项目实现 |
-|---|---|
-| Profile/Bundle | `apps/server/src/index.ts` 中的插件挂载顺序 |
-| ctx.llm | `packages/llm` — LlmService |
-| ctx.sessions | `packages/session` — SessionService |
-| ctx.tools | `packages/tools` — ToolRegistry |
-| ctx.agentLoop | `packages/agent-loop` — AgentLoop |
-| 自研插件 | `packages/excel-tool` — ExcelTool |
+```bash
+# 运行单元测试（覆盖执行器、安全防御、质检规则、脱敏算法等）
+pnpm test
 
-## License
+# 运行金标准评测套件自检（20 题基准基线）
+pnpm eval:gold
 
-[MIT](LICENSE)
+# 运行端到端 Agent 自动化大考
+pnpm eval
+```
+
+---
+
+## 📄 开源许可
+
+本项目遵循 [GNU AGPL-3.0](LICENSE) 强互惠开源许可协议。
+
+- 允许个人学习、研究与非商业自用；
+- 任何基于本项目的衍生修改或将其部署为网络服务（SaaS）的机构，必须遵循 AGPL-3.0 协议向社区强制公开全部源代码；
+- 如需闭源商业授权或企业定制，请联系项目维护者。

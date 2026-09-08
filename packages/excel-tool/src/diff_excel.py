@@ -93,7 +93,118 @@ def values_match(val_out: Any, val_bench: Any, float_tol: float = 0.05) -> bool:
     s_bench = str(val_bench).strip()
     return s_out == s_bench
 
-def compare_excel(output_path: str, benchmark_path: str) -> Dict[str, Any]:
+def detect_mode(df_bench: pd.DataFrame, df_out: pd.DataFrame) -> str:
+    """自动嗅探是目标模板(template)还是真实标杆(ground_truth)"""
+    bench_rows = len(df_bench)
+    out_rows = len(df_out)
+
+    # 规则 1: 标杆仅有表头，无任何数据行 (0 行) -> 100% 目标模板
+    if bench_rows == 0:
+        return "template"
+
+    # 规则 2: 标杆行数极少 (1~3行)，而产物数据明显较多 (>= 5行) -> 目标模板(仅含示例行)
+    if bench_rows <= 3 and out_rows >= 5:
+        return "template"
+
+    # 规则 3: 产物数据规模较大 (>= 10行)，标杆行数不足产物的 15% -> 目标模板
+    if out_rows >= 10 and bench_rows <= max(3, int(out_rows * 0.15)):
+        return "template"
+
+    # 规则 4: 默认判定为真实标杆数值对账 (ground_truth)
+    return "ground_truth"
+
+def compare_template_schema(
+    df_out: pd.DataFrame,
+    df_bench: pd.DataFrame,
+    output_path: str,
+    benchmark_path: str
+) -> Dict[str, Any]:
+    """目标模板契约核验：核对列名覆盖率、列序一致性及数据填充率"""
+    cols_out = [c for c in df_out.columns if c and not c.startswith('Unnamed:')]
+    cols_bench = [c for c in df_bench.columns if c and not c.startswith('Unnamed:')]
+
+    common_cols = [c for c in cols_bench if c in cols_out]
+    missing_cols = [c for c in cols_bench if c not in cols_out]
+    extra_cols = [c for c in cols_out if c not in cols_bench]
+
+    output_rows = len(df_out)
+    benchmark_rows = len(df_bench)
+
+    columns_detail = []
+    column_stats = []
+
+    for idx, col in enumerate(cols_bench):
+        matched = col in cols_out
+        actual_idx = cols_out.index(col) if matched else None
+        order_matched = (actual_idx == idx) if matched else False
+
+        if matched and output_rows > 0:
+            non_null_count = int(df_out[col].dropna().astype(str).str.strip().ne('').sum())
+            pop_rate = round((non_null_count / output_rows * 100), 1)
+        else:
+            non_null_count = 0
+            pop_rate = 0.0
+
+        columns_detail.append({
+            "column": col,
+            "matched": matched,
+            "expectedIndex": idx,
+            "actualIndex": actual_idx,
+            "orderMatched": order_matched,
+            "populatedRate": pop_rate
+        })
+
+        column_stats.append({
+            "column": col,
+            "matchCount": non_null_count if matched else 0,
+            "totalCount": output_rows,
+            "matchRate": 100.0 if matched else 0.0,
+            "mismatchExamples": []
+        })
+
+    coverage_rate = round((len(common_cols) / len(cols_bench) * 100), 2) if cols_bench else 100.0
+    all_order_matched = all(c["orderMatched"] for c in columns_detail) if columns_detail else True
+
+    summary_parts = []
+    if len(missing_cols) == 0:
+        summary_parts.append(f"✅ 产物表头与目标模板 100% 契合（共 {len(cols_bench)} 个字段）。")
+        if all_order_matched:
+            summary_parts.append("列顺序完全对齐。")
+        else:
+            summary_parts.append("部分列顺序存在差异。")
+        summary_parts.append(f"数据已填充 {output_rows} 行。")
+    else:
+        summary_parts.append(f"⚠️ 产物缺少目标模板要求的 {len(missing_cols)} 个字段: {', '.join(missing_cols)}；覆盖率 {coverage_rate}%。")
+
+    if extra_cols:
+        summary_parts.append(f"ℹ️ 产物包含 {len(extra_cols)} 个额外字段: {', '.join(extra_cols[:5])}。")
+
+    summary_text = "".join(summary_parts)
+
+    return {
+        "success": True,
+        "mode": "template",
+        "outputFilename": os.path.basename(output_path),
+        "benchmarkFilename": os.path.basename(benchmark_path),
+        "outputRowCount": output_rows,
+        "benchmarkRowCount": benchmark_rows,
+        "commonColumns": common_cols,
+        "missingColumns": missing_cols,
+        "extraColumns": extra_cols,
+        "columnStats": column_stats,
+        "overallMatchRate": coverage_rate,
+        "summaryText": summary_text,
+        "templateChecks": {
+            "coverageRate": coverage_rate,
+            "orderMatched": all_order_matched,
+            "missingColumns": missing_cols,
+            "extraColumns": extra_cols,
+            "columns": columns_detail,
+            "summary": summary_text
+        }
+    }
+
+def compare_excel(output_path: str, benchmark_path: str, mode: str = "auto") -> Dict[str, Any]:
     df_out = load_excel_flexible(output_path)
     df_bench = load_excel_flexible(benchmark_path)
 
@@ -117,6 +228,15 @@ def compare_excel(output_path: str, benchmark_path: str) -> Dict[str, Any]:
 
     df_out.columns = [clean_col_name(c) for c in df_out.columns]
     df_bench.columns = [clean_col_name(c) for c in df_bench.columns]
+
+    # 模式判定
+    if mode == "auto":
+        resolved_mode = detect_mode(df_bench, df_out)
+    else:
+        resolved_mode = mode.lower()
+
+    if resolved_mode == "template":
+        return compare_template_schema(df_out, df_bench, output_path, benchmark_path)
 
     # 过滤掉类似 Unnamed: 7 这种无名辅助列
     cols_out = [c for c in df_out.columns if c and not c.startswith('Unnamed:')]
@@ -225,6 +345,7 @@ def compare_excel(output_path: str, benchmark_path: str) -> Dict[str, Any]:
 
     return {
         "success": True,
+        "mode": "ground_truth",
         "outputFilename": os.path.basename(output_path),
         "benchmarkFilename": os.path.basename(benchmark_path),
         "outputRowCount": output_rows,
@@ -241,15 +362,24 @@ def main():
     if len(sys.argv) < 3:
         print(json.dumps({
             "success": False,
-            "error": "参数不足，用法: python diff_excel.py <output_excel> <benchmark_excel>"
+            "error": "参数不足，用法: python diff_excel.py <output_excel> <benchmark_excel> [--mode auto|template|ground_truth]"
         }, ensure_ascii=False))
         sys.exit(1)
 
     out_file = sys.argv[1]
     bench_file = sys.argv[2]
+    mode = "auto"
+    if len(sys.argv) >= 4:
+        arg3 = sys.argv[3]
+        if arg3.startswith("--mode="):
+            mode = arg3.split("=", 1)[1]
+        elif arg3 == "--mode" and len(sys.argv) >= 5:
+            mode = sys.argv[4]
+        else:
+            mode = arg3
 
     try:
-        report = compare_excel(out_file, bench_file)
+        report = compare_excel(out_file, bench_file, mode=mode)
         print(json.dumps(report, ensure_ascii=False, indent=2))
     except Exception as e:
         print(json.dumps({
@@ -260,3 +390,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

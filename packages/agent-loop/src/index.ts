@@ -9,6 +9,7 @@ import type { LlmService } from '@excel-harness/llm'
 import type { SessionService, SessionMessage, Session, ExcelMeta } from '@excel-harness/session'
 import type { ToolRegistry } from '@excel-harness/tools'
 import type { ChatCompletionMessageParam, ChatCompletionChunk } from 'openai/resources'
+import { PlaybookManager } from './playbook-loader.ts'
 
 // ─── 类型定义 ─────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,8 @@ export interface AgentLoopConfig {
   maxSteps?: number
   /** 系统提示词 */
   systemPrompt?: string
+  /** Playbook 知识库根目录 */
+  playbookDir?: string
 }
 
 // ─── Agent Loop 服务 ──────────────────────────────────────────────────────────
@@ -41,11 +44,13 @@ export class AgentLoop extends Service<AgentLoopConfig> {
   private maxSteps: number
   private systemPrompt: string
   private runningControllers = new Map<string, AbortController>()
+  public playbookManager: PlaybookManager
 
-  constructor(ctx: Context, config: AgentLoopConfig) {
+  constructor(ctx: Context, config: AgentLoopConfig = {}) {
     super(ctx, 'agentLoop')
     this.maxSteps = config.maxSteps ?? 10
     this.systemPrompt = config.systemPrompt ?? DEFAULT_SYSTEM_PROMPT
+    this.playbookManager = new PlaybookManager(config.playbookDir)
   }
 
   /**
@@ -249,6 +254,17 @@ export class AgentLoop extends Service<AgentLoopConfig> {
       })
     }
 
+    // 动态检索并注入与当前任务匹配的 Playbook 规范知识
+    const userQueries = session.messages.filter((m) => m.role === 'user').map((m) => m.content).join(' ')
+    const filenames = excelFiles.map((f) => f.filename)
+    const playbookPrompt = this.playbookManager.formatPlaybookPrompt(userQueries, filenames)
+    if (playbookPrompt) {
+      history.push({
+        role: 'system',
+        content: playbookPrompt,
+      })
+    }
+
     // 收集所有合法已存储的 tool 消息的 toolCallId
     const toolResponseIds = new Set<string>()
     for (const msg of session.messages) {
@@ -355,7 +371,34 @@ export class AgentLoop extends Service<AgentLoopConfig> {
   }
 
   private _formatBenchmarkContext(meta: ExcelMeta): string {
+    const isTemplate = meta.benchmarkRole === 'template'
     const lines: string[] = []
+
+    if (isTemplate) {
+      lines.push(`## 📋 用户已挂载期望输出的目标模板/格式样表（Template Blueprint）`)
+      lines.push(`- 模板文件名: ${meta.filename}`)
+      lines.push(`- 目标列结构 (${meta.columnCount} 列): ${meta.headers.join(' | ')}`)
+      lines.push(`- 表头层级: ${meta.headerLevels} 层表头结构 (数据起始行: 第 ${meta.dataStartRow} 行)`)
+      if (meta.rowCount > 0) {
+        lines.push(`- 模板样例数据规模: 约 ${meta.rowCount} 行`)
+      }
+
+      const samples = meta.sanitizedSamples?.slice(0, 3) || meta.sampleRows.slice(0, 3)
+      if (samples.length > 0) {
+        lines.push(`- 模板表头及样式范例:`)
+        lines.push('| ' + meta.headers.join(' | ') + ' |')
+        lines.push('| ' + meta.headers.map(() => '---').join(' | ') + ' |')
+        for (const s of samples) {
+          lines.push('| ' + meta.headers.map((h) => String(s[h] ?? '').replace(/\n/g, ' ')).join(' | ') + ' |')
+        }
+      }
+
+      lines.push(`\n【核心生成契约与硬性约束】：`)
+      lines.push(`1. 本文件是用户期望的【最终输出目标模板】！生成的 Python 处理工具产出的 Excel，其表头字段名与顺序必须 100% 严格对齐此列结构：${JSON.stringify(meta.headers)}！绝对不可自行捏造、改写、缩写或遗漏任何列名！`)
+      lines.push(`2. ⚠️ 极其重要：此模板文件仅代表输出格式标准与契约，切勿在 Python 代码中将其作为业务数据源去加载或合并！你的数据来源只能是用户上传的原材料数据源！`)
+      return lines.join('\n')
+    }
+
     lines.push(`## 🎯 用户已挂载的预期标准结果标杆样本（Ground Truth Benchmark）`)
     lines.push(`- 标杆文件名: ${meta.filename}`)
     lines.push(`- 目标列结构 (${meta.columnCount} 列): ${meta.headers.join(' | ')}`)

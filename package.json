@@ -14,11 +14,14 @@
     "dev:web": "pnpm --filter @excel-harness/web dev",
     "build": "tsc --noEmit",
     "web:build": "pnpm --filter @excel-harness/web build",
-    "test": "node --test"
+    "test": "node --test",
+    "eval": "tsx scripts/eval_agent.ts",
+    "eval:gold": "python3 evals/run_eval.py --gold"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "concurrently": "^10.0.5",
+    "cordis": "^3.18.1",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0"
   }

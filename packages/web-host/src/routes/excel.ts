@@ -5,6 +5,7 @@ import { resolve, extname } from 'path'
 import { randomUUID } from 'crypto'
 import { inspectExcel, sanitizeSampleRows, compareExcelFiles } from '@excel-harness/excel-tool'
 import type { ExcelMeta, DesensitizationRuleConfig } from '@excel-harness/shared'
+import { isPathSafe } from '../utils/security.js'
 
 
 const ALLOWED_EXCEL_EXTS = new Set(['.xlsx', '.csv'])
@@ -28,8 +29,12 @@ export function registerExcelRoutes(router: Router, ctx: Context) {
 
     const files = Array.isArray(rawFile) ? rawFile : [rawFile]
     const uploadDir = resolve('.sessions', session.id, 'uploads')
+    const backupDir = resolve('.sessions', session.id, 'backups')
     if (!existsSync(uploadDir)) {
       mkdirSync(uploadDir, { recursive: true })
+    }
+    if (!existsSync(backupDir)) {
+      mkdirSync(backupDir, { recursive: true })
     }
 
     const newMetas: ExcelMeta[] = []
@@ -50,9 +55,12 @@ export function registerExcelRoutes(router: Router, ctx: Context) {
 
       const fileId = randomUUID()
       const targetPath = resolve(uploadDir, `${fileId}_${originalName}`)
+      const backupPath = resolve(backupDir, `${fileId}_${originalName}`)
       const tempPath = file.filepath || file.path
 
       copyFileSync(tempPath, targetPath)
+      // 同步创建不可变冷备份镜像
+      copyFileSync(tempPath, backupPath)
 
       try {
         const inspection = await inspectExcel(targetPath)
@@ -83,6 +91,7 @@ export function registerExcelRoutes(router: Router, ctx: Context) {
           fileId,
           filename: originalName,
           filepath: targetPath,
+          backupPath,
           fileSizeBytes: file.size ?? 0,
           uploadedAt: Date.now(),
           sheets: inspection.sheets,
@@ -245,6 +254,19 @@ export function registerExcelRoutes(router: Router, ctx: Context) {
 
     try {
       const inspection = await inspectExcel(targetPath)
+
+      // 本地智能嗅探：依据行数与会话输入数据对比判定是「目标模板」还是「真实标杆」
+      let detectedRole: 'template' | 'ground_truth' = 'ground_truth'
+      if (inspection.rowCount <= 3) {
+        detectedRole = 'template'
+      } else {
+        const inputFiles = session.excelFiles ?? (session.excelMeta ? [session.excelMeta] : [])
+        const maxInputRows = Math.max(0, ...inputFiles.map(f => f.rowCount))
+        if (maxInputRows >= 10 && inspection.rowCount <= Math.max(3, Math.floor(maxInputRows * 0.15))) {
+          detectedRole = 'template'
+        }
+      }
+
       const benchmarkMeta: ExcelMeta = {
         fileId,
         filename: originalName,
@@ -262,6 +284,8 @@ export function registerExcelRoutes(router: Router, ctx: Context) {
         headers: inspection.headers,
         sampleRows: inspection.sampleRows,
         sensitiveColumns: [],
+        benchmarkRole: detectedRole,
+        detectedMode: detectedRole,
       }
 
       ctx.sessions.setBenchmarkFile(session.id, benchmarkMeta)
@@ -269,6 +293,31 @@ export function registerExcelRoutes(router: Router, ctx: Context) {
     } catch (err: any) {
       koaCtx.status = 500
       koaCtx.body = { ok: false, error: `标杆文件解析失败: ${err.message}` }
+    }
+  })
+
+  // 切换已挂载参考文件的角色模式 (template 模板 或 ground_truth 标杆)
+  router.post('/api/sessions/:id/benchmark-role', async (koaCtx) => {
+    const session = ctx.sessions.get(koaCtx.params.id)
+    if (!session) {
+      koaCtx.status = 404
+      koaCtx.body = { error: '会话不存在' }
+      return
+    }
+
+    const { role } = (koaCtx.request.body as any) ?? {}
+    if (role !== 'template' && role !== 'ground_truth') {
+      koaCtx.status = 400
+      koaCtx.body = { error: '非法的角色类型，必须为 template 或 ground_truth' }
+      return
+    }
+
+    try {
+      const updated = ctx.sessions.setBenchmarkRole(session.id, role)
+      koaCtx.body = { ok: true, benchmarkFile: updated }
+    } catch (err: any) {
+      koaCtx.status = 400
+      koaCtx.body = { ok: false, error: err.message }
     }
   })
 
@@ -285,7 +334,7 @@ export function registerExcelRoutes(router: Router, ctx: Context) {
     koaCtx.body = { ok: true }
   })
 
-  // 执行产物与标杆文件的验收对比 (Diff 对账)
+  // 执行产物与样表/标杆文件的验收对比 (契约核验 或 Diff 对账)
   router.post('/api/sessions/:id/compare-benchmark', async (koaCtx) => {
     const session = ctx.sessions.get(koaCtx.params.id)
     if (!session) {
@@ -297,23 +346,60 @@ export function registerExcelRoutes(router: Router, ctx: Context) {
     const benchmark = session.benchmarkFile
     if (!benchmark || !benchmark.filepath || !existsSync(benchmark.filepath)) {
       koaCtx.status = 400
-      koaCtx.body = { error: '当前会话未挂载预期标杆文件，请先上传标杆 Excel' }
+      koaCtx.body = { error: '当前会话未挂载样表或标杆文件，请先上传' }
       return
     }
 
-    const { outputFilepath } = (koaCtx.request.body as any) ?? {}
+    const { outputFilepath, mode } = (koaCtx.request.body as any) ?? {}
     if (!outputFilepath || !existsSync(outputFilepath)) {
       koaCtx.status = 400
       koaCtx.body = { error: '未找到待对比的输出产物文件，请先运行工具生成产物' }
       return
     }
 
+    const compareMode = (mode || benchmark.benchmarkRole || 'auto') as 'auto' | 'template' | 'ground_truth'
+
     try {
-      const diff = await compareExcelFiles(outputFilepath, benchmark.filepath, process.env.PYTHON_PATH)
+      const diff = await compareExcelFiles(outputFilepath, benchmark.filepath, process.env.PYTHON_PATH, compareMode)
       koaCtx.body = { ok: true, diff }
     } catch (err: any) {
       koaCtx.status = 500
-      koaCtx.body = { ok: false, error: `标杆对账比对失败: ${err.message}` }
+      koaCtx.body = { ok: false, error: `样表/标杆核验失败: ${err.message}` }
+    }
+  })
+
+  // 产物前 N 行快速嗅探与结构预览
+  router.get('/api/excel/preview', async (koaCtx) => {
+    const filepath = koaCtx.query.filepath as string
+    if (!filepath) {
+      koaCtx.status = 400
+      koaCtx.body = { ok: false, error: '缺少 filepath 参数' }
+      return
+    }
+
+    const allowedRoots = [resolve('.sessions')]
+    if (!isPathSafe(filepath, allowedRoots) || !existsSync(filepath)) {
+      koaCtx.status = 403
+      koaCtx.body = { ok: false, error: '非法的文件访问路径或文件不存在' }
+      return
+    }
+
+    try {
+      const inspection = await inspectExcel(filepath, process.env.PYTHON_PATH)
+      koaCtx.body = {
+        ok: true,
+        preview: {
+          sheets: inspection.sheets,
+          activeSheet: inspection.activeSheet,
+          rowCount: inspection.rowCount,
+          columnCount: inspection.columnCount,
+          headers: inspection.headers,
+          sampleRows: inspection.sampleRows,
+        },
+      }
+    } catch (err: any) {
+      koaCtx.status = 500
+      koaCtx.body = { ok: false, error: `解析产物预览失败: ${err.message}` }
     }
   })
 }

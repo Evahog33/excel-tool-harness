@@ -4,13 +4,13 @@
  */
 
 import { spawn, execFile } from 'child_process'
-import { writeFileSync, mkdirSync, existsSync, unlinkSync, readdirSync, rmSync } from 'fs'
-import { join, dirname, basename, resolve } from 'path'
-import { randomUUID } from 'crypto'
+import { writeFileSync, readFileSync, copyFileSync, statSync, mkdirSync, existsSync, unlinkSync, readdirSync, rmSync } from 'fs'
+import { join, dirname, basename, resolve, extname } from 'path'
+import { randomUUID, createHash } from 'crypto'
 import { promisify } from 'util'
 import { StringDecoder } from 'string_decoder'
 import { fileURLToPath } from 'node:url'
-import type { ToolRunParams } from '@excel-harness/shared'
+import type { ToolRunParams, OutputFilePreview, WorkbookValidationReport } from '@excel-harness/shared'
 
 const execFileAsync = promisify(execFile)
 
@@ -19,6 +19,8 @@ export const DEFAULT_PYTHON_CMD = process.platform === 'win32' ? 'python' : 'pyt
 export interface OutputFileInfo {
   filename: string
   filepath: string
+  preview?: OutputFilePreview
+  validation?: WorkbookValidationReport
 }
 
 export interface RunPythonOptions {
@@ -74,13 +76,45 @@ export async function runPython(opts: RunPythonOptions): Promise<RunPythonResult
   const outputDir = join(tmpDir, scriptId)
   mkdirSync(outputDir, { recursive: true })
 
+  // 0. 输入文件安全审计与指纹记录（防范大模型代码越权篡改原输入文件）
+  interface MonitoredFile {
+    filepath: string
+    originalSha256: string
+    snapshotPath: string
+  }
+  const monitoredFiles: MonitoredFile[] = []
+
+  // 扫描 params 中所有指向本地现有文件的输入参数
+  for (const [, val] of Object.entries(params)) {
+    if (typeof val === 'string' && val.trim().length > 0) {
+      try {
+        const resolvedPath = resolve(val.trim())
+        if (existsSync(resolvedPath) && statSync(resolvedPath).isFile()) {
+          const originalSha256 = createHash('sha256').update(readFileSync(resolvedPath)).digest('hex')
+          // 在 outputDir 中创建一份执行期快照，用作自愈回滚镜像
+          const snapshotPath = join(outputDir, `.safety_snapshot_${randomUUID()}_${basename(resolvedPath)}`)
+          copyFileSync(resolvedPath, snapshotPath)
+          monitoredFiles.push({
+            filepath: resolvedPath,
+            originalSha256,
+            snapshotPath,
+          })
+        }
+      } catch {
+        // 忽略非文件参数
+      }
+    }
+  }
+
   // 1. 参数落盘为 input.json（彻底避开操作系统的环境变量长度上限 E2BIG）
   const inputJsonPath = join(outputDir, 'input.json')
   writeFileSync(inputJsonPath, JSON.stringify(params, null, 2), 'utf-8')
 
   // 2. 写入脚本前导代码：优先从 input.json 文件读取，同时兼容环境变量
   const preamble = `
-import os, sys, json
+import os, sys, json, warnings
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
 OUTPUT_DIR = ${JSON.stringify(outputDir)}
 INPUT_JSON_PATH = ${JSON.stringify(inputJsonPath)}
 
@@ -116,6 +150,7 @@ else:
       env: {
         ...process.env,
         PYTHONUNBUFFERED: '1', // 禁用 Python C 级输出缓冲，确保实时输出
+        PYTHONWARNINGS: process.env.PYTHONWARNINGS || 'ignore::DeprecationWarning',
         EXCEL_OUTPUT_DIR: outputDir,
         EXCEL_INPUT_JSON: inputJsonPath,
         EXCEL_PARAMS: JSON.stringify(params),
@@ -218,8 +253,8 @@ else:
       }
     })
 
-    // 5. 退出处理与产物扫描
-    pyProcess.on('close', (code) => {
+    // 5. 退出处理、安全审计与产物扫描
+    pyProcess.on('close', async (code) => {
       if (!isFinished) {
         isFinished = true
         clearTimeout(timer)
@@ -229,14 +264,69 @@ else:
         stdoutBuffer += stdoutDecoder.end()
         stderrBuffer += stderrDecoder.end()
 
+        // ── 5.1 篡改审计与紧急自动回滚自愈 ──
+        let hasTampering = false
+        let tamperErrorMessage = ''
+        for (const m of monitoredFiles) {
+          try {
+            if (existsSync(m.filepath)) {
+              const currentSha256 = createHash('sha256').update(readFileSync(m.filepath)).digest('hex')
+              if (currentSha256 !== m.originalSha256) {
+                hasTampering = true
+                // 立即执行秒级自动还原
+                copyFileSync(m.snapshotPath, m.filepath)
+                tamperErrorMessage += `\n❌ [安全隔离警报] 检测到 Python 代码非法修改了原始输入文件:「${basename(m.filepath)}」！\n系统已触发紧急熔断，并自动从安全备份中秒级恢复了原文件。\n【系统禁令】：大模型生成的脚本严禁在输入原路径上执行覆盖写入！所有处理结果必须写入到系统分配的 OUTPUT_DIR 目录下（如 os.path.join(OUTPUT_DIR, "result.xlsx")）。请修正代码中直接回写原文件的逻辑后重试。`
+              }
+            }
+          } catch (err: any) {
+            console.error(`核验/还原原文件失败: ${err.message}`)
+          }
+        }
+
+        if (hasTampering) {
+          stderrBuffer = (stderrBuffer + '\n' + tamperErrorMessage).trim()
+        }
+
+        const isSuccess = code === 0 && !hasTampering
+        const primaryInputPath = monitoredFiles[0]?.filepath
+
+        // ── 5.2 扫描实际产物，并对首批 Excel 产物自动提取前 N 行快速预览与出厂质检 ──
         const outputFiles: OutputFileInfo[] = []
         if (existsSync(outputDir)) {
           for (const fname of readdirSync(outputDir)) {
-            // 排除 input.json 及隐藏文件，只识别实际产物
+            // 排除 input.json、隐藏快照及临时文件，只识别实际产物
             if (!fname.startsWith('.') && fname !== 'input.json') {
+              const filepath = join(outputDir, fname)
+              let preview: OutputFilePreview | undefined = undefined
+              let validation: WorkbookValidationReport | undefined = undefined
+              const ext = extname(fname).toLowerCase()
+              if (isSuccess && (ext === '.xlsx' || ext === '.csv')) {
+                try {
+                  const inspection = await inspectExcel(filepath, pythonPath)
+                  preview = {
+                    sheets: inspection.sheets,
+                    activeSheet: inspection.activeSheet,
+                    rowCount: inspection.rowCount,
+                    columnCount: inspection.columnCount,
+                    headers: inspection.headers,
+                    sampleRows: inspection.sampleRows,
+                  }
+                } catch {
+                  // 容错：解析预览失败不阻断产物下载
+                }
+
+                try {
+                  validation = await validateWorkbook(filepath, primaryInputPath, pythonPath)
+                } catch {
+                  // 容错：质检异常不阻断产物下载
+                }
+              }
+
               outputFiles.push({
                 filename: fname,
-                filepath: join(outputDir, fname),
+                filepath,
+                preview,
+                validation,
               })
             }
           }
@@ -247,7 +337,7 @@ else:
         }
 
         resolve({
-          success: code === 0,
+          success: isSuccess,
           stdout: stdoutBuffer,
           stderr: stderrBuffer,
           durationMs: Date.now() - start,
@@ -335,13 +425,15 @@ export async function checkPythonSyntax(
 
 const DIFF_SCRIPT_PATH = resolve(fileURLToPath(import.meta.url), '../diff_excel.py')
 
-/** 对比生成产物与预期标杆文件，出具对账 DiffReport */
+/** 对比生成产物与预期标杆文件，出具对账/契约 DiffReport */
 export async function compareExcelFiles(
   outputPath: string,
   benchmarkPath: string,
   pythonPath = process.env.PYTHON_PATH ?? DEFAULT_PYTHON_CMD,
+  mode: 'auto' | 'template' | 'ground_truth' = 'auto',
 ): Promise<import('@excel-harness/shared').DiffReport> {
-  const { stdout, stderr } = await execFileAsync(pythonPath, [DIFF_SCRIPT_PATH, outputPath, benchmarkPath], {
+  const args = [DIFF_SCRIPT_PATH, outputPath, benchmarkPath, `--mode=${mode}`]
+  const { stdout, stderr } = await execFileAsync(pythonPath, args, {
     timeout: 30_000,
     encoding: 'utf-8',
     maxBuffer: 10 * 1024 * 1024,
@@ -357,5 +449,39 @@ export async function compareExcelFiles(
   }
 
   return res as import('@excel-harness/shared').DiffReport
+}
+
+const VALIDATOR_SCRIPT_PATH = resolve(fileURLToPath(import.meta.url), '../validator.py')
+
+/**
+ * 运行出厂回读质检器 (validate_workbook)
+ * 100% 本地纯代码运行，绝不调用任何外部模型或网络 API
+ */
+export async function validateWorkbook(
+  outputPath: string,
+  inputPath?: string,
+  pythonPath = process.env.PYTHON_PATH ?? DEFAULT_PYTHON_CMD,
+): Promise<WorkbookValidationReport> {
+  const args = [VALIDATOR_SCRIPT_PATH, outputPath]
+  if (inputPath && existsSync(inputPath)) {
+    args.push(inputPath)
+  }
+
+  const { stdout, stderr } = await execFileAsync(pythonPath, args, {
+    timeout: 30_000,
+    encoding: 'utf-8',
+    maxBuffer: 10 * 1024 * 1024,
+  })
+
+  if (!stdout.trim()) {
+    throw new Error(stderr || '质检器未产生任何输出')
+  }
+
+  const res = JSON.parse(stdout)
+  if (!res.success) {
+    throw new Error(res.error || '工作簿质检失败')
+  }
+
+  return res.data as WorkbookValidationReport
 }
 

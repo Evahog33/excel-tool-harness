@@ -17,14 +17,16 @@ describe('Web-Host 安全路径校验防御', () => {
     assert.equal(isPathSafe(validFile2, allowedRoots), true)
   })
 
-  test('Windows 路径大小写不敏感匹配', () => {
-    const root = resolve('.sessions')
-    const lowerFile = root.toLowerCase() + (process.platform === 'win32' ? '\\sub\\test.xlsx' : '/sub/test.xlsx')
-    const upperFile = root.toUpperCase() + (process.platform === 'win32' ? '\\sub\\test.xlsx' : '/sub/test.xlsx')
-    assert.equal(isPathSafe(lowerFile, [root]), true)
-    if (process.platform === 'win32') {
-      assert.equal(isPathSafe(upperFile, [root]), true)
+  test('Windows 路径大小写不敏感匹配', (t) => {
+    if (process.platform !== 'win32') {
+      t.skip('非 Windows 环境跳过大小写测试')
+      return
     }
+    const root = resolve('.sessions')
+    const lowerFile = root.toLowerCase() + '\\sub\\test.xlsx'
+    const upperFile = root.toUpperCase() + '\\sub\\test.xlsx'
+    assert.equal(isPathSafe(lowerFile, [root]), true)
+    assert.equal(isPathSafe(upperFile, [root]), true)
   })
 
   test('拦截使用 ../ 进行路径穿越攻击', () => {

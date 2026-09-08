@@ -114,4 +114,90 @@ describe('Python Runner 与 Inspector 运行环境验证', () => {
       try { unlinkSync(csv2) } catch {}
     }
   })
+
+  test('runPython 防篡改机制：检测到恶意/误操作覆盖原输入文件时自动熔断并秒级还原', async () => {
+    const originalFile = resolve('.sessions', 'test_original_input.csv')
+    const originalContent = '姓名,年龄\n张三,18\n李四,20\n'
+    writeFileSync(originalFile, originalContent, 'utf-8')
+
+    try {
+      // 模拟大模型编写的非法脚本：直接往原文件写入垃圾数据
+      const maliciousCode = `
+import os
+input_path = PARAMS.get("input_file")
+with open(input_path, "w", encoding="utf-8") as f:
+    f.write("HACKED_CORRUPTED_DATA")
+`
+      const result = await runPython({
+        code: maliciousCode,
+        params: { input_file: originalFile },
+      })
+
+      // 1. 验证系统阻断：强制判定失败
+      assert.equal(result.success, false)
+      // 2. 验证告警信息已进入 stderr
+      assert.match(result.stderr, /安全隔离警报/)
+      assert.match(result.stderr, /检测到 Python 代码非法修改了原始输入文件/)
+      // 3. 验证原文件已被秒级自动还原回初始内容
+      const { readFileSync } = await import('fs')
+      const restoredContent = readFileSync(originalFile, 'utf-8')
+      assert.equal(restoredContent, originalContent, '原输入文件必须被自动还原，原数据绝不能丢失')
+    } finally {
+      try { unlinkSync(originalFile) } catch {}
+    }
+  })
+
+  test('compareExcelFiles 目标模板模式：空模板或少量样表能精准识别并进行表头与结构契约核验', async () => {
+    const outCsv = resolve('.sessions', 'test_template_out.csv')
+    const benchCsv = resolve('.sessions', 'test_template_bench.csv')
+
+    // 标杆为空模板（仅有表头，0行数据）
+    writeFileSync(benchCsv, '部门,姓名,实发工资,绩效评级\n', 'utf-8')
+    // 产物包含 6 行数据且完全对齐表头与顺序
+    const outData = '部门,姓名,实发工资,绩效评级\n' +
+      '研发部,张三,15000,A\n' +
+      '研发部,李四,18000,S\n' +
+      '市场部,王五,12000,B\n' +
+      '市场部,赵六,14000,A\n' +
+      '财务部,孙七,11000,A\n' +
+      '财务部,周八,13000,B\n'
+    writeFileSync(outCsv, outData, 'utf-8')
+
+    try {
+      const report = await compareExcelFiles(outCsv, benchCsv)
+      assert.equal(report.success, true)
+      assert.equal(report.mode, 'template', '应自动识别为模板契约核验模式')
+      assert.equal(report.overallMatchRate, 100)
+      assert.equal(report.templateChecks?.orderMatched, true)
+      assert.equal(report.templateChecks?.missingColumns.length, 0)
+      assert.equal(report.templateChecks?.columns.length, 4)
+      assert.equal(report.templateChecks?.columns[0].populatedRate, 100)
+      assert.match(report.summaryText, /100% 契合/)
+    } finally {
+      try { unlinkSync(outCsv) } catch {}
+      try { unlinkSync(benchCsv) } catch {}
+    }
+  })
+
+  test('compareExcelFiles 目标模板模式：当产物缺少模板关键列时准确定位并列出 missingColumns', async () => {
+    const outCsv = resolve('.sessions', 'test_missing_col_out.csv')
+    const benchCsv = resolve('.sessions', 'test_missing_col_bench.csv')
+
+    // 标杆期望 4 列
+    writeFileSync(benchCsv, '部门,姓名,实发工资,绩效评级\n', 'utf-8')
+    // 产物缺少「实发工资」列
+    writeFileSync(outCsv, '部门,姓名,绩效评级\n研发部,张三,A\n', 'utf-8')
+
+    try {
+      const report = await compareExcelFiles(outCsv, benchCsv, undefined, 'template')
+      assert.equal(report.success, true)
+      assert.equal(report.mode, 'template')
+      assert.equal(report.overallMatchRate, 75) // 3/4 = 75%
+      assert.equal(report.templateChecks?.missingColumns.includes('实发工资'), true)
+      assert.match(report.summaryText, /缺少目标模板要求的 1 个字段/)
+    } finally {
+      try { unlinkSync(outCsv) } catch {}
+      try { unlinkSync(benchCsv) } catch {}
+    }
+  })
 })

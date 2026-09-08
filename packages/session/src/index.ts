@@ -272,6 +272,18 @@ export class SessionService extends Service<SessionServiceConfig> {
     return session.benchmarkFile
   }
 
+  /** 修改已挂载标杆文件的角色模式 (template 或 ground_truth) */
+  setBenchmarkRole(sessionId: string, role: 'template' | 'ground_truth'): ExcelMeta {
+    const session = this.cache.get(sessionId)
+    if (!session) throw new Error(`会话不存在: ${sessionId}`)
+    if (!session.benchmarkFile) throw new Error('当前会话尚未挂载样表或标杆文件')
+    session.benchmarkFile.benchmarkRole = role
+    session.updatedAt = Date.now()
+    this._persist(session)
+    this.ctx.emit('session/benchmark-updated', { sessionId, benchmarkFile: session.benchmarkFile })
+    return session.benchmarkFile
+  }
+
   /** 清除会话的预期标杆文件并删除物理文件 */
   clearBenchmarkFile(sessionId: string): void {
     const session = this.cache.get(sessionId)

@@ -8,3 +8,11 @@ __pycache__/
 apps/web/dist/
 *.tsbuildinfo
 docs/excel/
+
+# macOS
+.DS_Store
+
+# Eval & Test Artifacts
+.sessions_eval/
+results/
+evals/fixtures/huge.xlsx

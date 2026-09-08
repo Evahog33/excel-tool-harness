@@ -10,10 +10,10 @@
 import { Context } from 'cordis'
 import { resolve, dirname, extname, join } from 'path'
 import { existsSync, mkdirSync } from 'fs'
-import { runPython, inspectExcel, checkPythonSyntax, compareExcelFiles } from './python-runner.js'
+import { runPython, inspectExcel, checkPythonSyntax, compareExcelFiles, validateWorkbook } from './python-runner.js'
 import type { UiSchema, ToolRunParams, ExcelMeta } from '@excel-harness/session'
 
-export { runPython, inspectExcel, checkPythonSyntax, compareExcelFiles }
+export { runPython, inspectExcel, checkPythonSyntax, compareExcelFiles, validateWorkbook }
 export type { ExcelInspectionResult, SensitiveColumnDetection, OutputFileInfo, RunPythonResult } from './python-runner'
 
 export * from './desensitizer'
@@ -160,22 +160,44 @@ export function apply(ctx: Context) {
           testStdout = testRun.stdout.slice(0, 500)
           generatedFiles = testRun.outputFiles?.map((f) => f.filename) || []
 
-          // 若会话挂载了标杆文件，进行自动标杆验收比对并出具简要指标
+          // ── 出厂体检自动化门禁 (拦截空产物、文件损坏、大面积 #REF! 公式崩溃) ──
+          const primaryValidation = testRun.outputFiles?.[0]?.validation
+          if (primaryValidation && primaryValidation.status === 'critical') {
+            const criticalChecks = primaryValidation.checks.filter((c) => c.level === 'critical')
+            const reasons = criticalChecks.map((c) => `${c.title}: ${c.detail} (${c.evidence})`).join('; ')
+            ctx.logger('excel-tool').warn(`代码预检出厂体检未通过 (存在致命硬伤): ${reasons}`)
+            return JSON.stringify({
+              status: 'error',
+              error: '出厂回读质检拦截：生成文件存在致命硬伤',
+              stderr: `[自动化出厂质检拦截 - 状态: 存在硬伤]\n原因: ${reasons}\n体检结论: ${primaryValidation.summary}`,
+              instruction: '你编写的代码虽然未抛出 Python 异常，但生成的文件未能通过出厂完整性质检（如文件损坏、数据行数为0被全部吞掉或公式崩溃）。请根据上方体检依据修正数据处理与写出逻辑，修复后重新调用 generate_excel_tool。',
+            })
+          }
+
+          let validationNotice = ''
+          if (primaryValidation) {
+            validationNotice = `\n[出厂体检状态: ${primaryValidation.statusLabel}] ${primaryValidation.summary}`
+          }
+
+          // 若会话挂载了样表/标杆文件，进行自动验收比对并出具简要指标
           let benchmarkNotice = ''
           if (latestSession.benchmarkFile && testRun.outputFiles && testRun.outputFiles.length > 0) {
             try {
+              const reqMode = latestSession.benchmarkFile.benchmarkRole || 'auto'
               const diff = await compareExcelFiles(
                 testRun.outputFiles[0].filepath,
                 latestSession.benchmarkFile.filepath,
                 process.env.PYTHON_PATH,
+                reqMode,
               )
-              benchmarkNotice = `\n[标杆验收自动比对] 整体匹配率: ${diff.overallMatchRate}%。${diff.summaryText}`
+              const modeLabel = diff.mode === 'template' ? '目标模板契约核验' : '标杆数值对账'
+              benchmarkNotice = `\n[${modeLabel}] 整体匹配率: ${diff.overallMatchRate}%。${diff.summaryText}`
             } catch (diffErr: any) {
               ctx.logger('excel-tool').warn('预检标杆比对失败:', diffErr)
             }
           }
 
-          testStdout = (testStdout + benchmarkNotice).trim()
+          testStdout = (testStdout + validationNotice + benchmarkNotice).trim()
         } else {
           // ── 模式 B: 无挂载数据源，执行 Python 代码静态编译与语法检查，彻底杜绝假 Mock 数据引发 KeyError 死循环 ──
           ctx.logger('excel-tool').info('当前会话无挂载数据源，执行 Python 静态语法编译检查...')

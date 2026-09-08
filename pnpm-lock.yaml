@@ -14,6 +14,9 @@ importers:
       concurrently:
         specifier: ^10.0.5
         version: 10.0.5
+      cordis:
+        specifier: ^3.18.1
+        version: 3.18.1
       tsx:
         specifier: ^4.19.0
         version: 4.23.13

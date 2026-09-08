@@ -47,6 +47,7 @@ export interface ExcelMeta {
   fileId: string
   filename: string
   filepath: string
+  backupPath?: string
   fileSizeBytes: number
   uploadedAt: number
   sheets: string[]
@@ -62,6 +63,8 @@ export interface ExcelMeta {
   sensitiveColumns: SensitiveColumnInfo[]
   desensitizationRules?: DesensitizationRuleConfig[]
   sanitizedSamples?: Record<string, any>[]
+  benchmarkRole?: 'template' | 'ground_truth'
+  detectedMode?: 'template' | 'ground_truth'
 }
 
 export type FormFieldValue = string | number | boolean | null | undefined
@@ -104,9 +107,45 @@ export interface Session {
   pythonCode?: string
 }
 
+export interface OutputFilePreview {
+  sheets: string[]
+  activeSheet: string
+  rowCount: number
+  columnCount: number
+  headers: string[]
+  sampleRows: Record<string, any>[]
+}
+
+export type ValidationStatus = 'healthy' | 'warning' | 'critical'
+
+export interface ValidationCheckItem {
+  category: 'integrity' | 'dimension' | 'error_token' | 'columns'
+  level: 'success' | 'warning' | 'critical'
+  title: string
+  detail: string
+  evidence: string
+}
+
+export interface WorkbookValidationReport {
+  status: ValidationStatus
+  statusLabel: string
+  summary: string
+  rowCount: number
+  columnCount: number
+  sheetCount: number
+  sheets: string[]
+  formulaCount: number
+  errorTokenCount: number
+  emptyColumnCount: number
+  inputRowCount?: number
+  checks: ValidationCheckItem[]
+}
+
 export interface OutputFileMeta {
   filename: string
   filepath: string
+  preview?: OutputFilePreview
+  validation?: WorkbookValidationReport
 }
 
 export interface ToolExecutionResult {
@@ -133,8 +172,27 @@ export interface ColumnDiffStat {
   mismatchExamples: MismatchExample[]
 }
 
+export interface TemplateColumnCheck {
+  column: string
+  matched: boolean
+  expectedIndex: number
+  actualIndex?: number
+  orderMatched: boolean
+  populatedRate: number // 0 - 100
+}
+
+export interface TemplateCheckResult {
+  coverageRate: number // 0 - 100
+  orderMatched: boolean
+  missingColumns: string[]
+  extraColumns: string[]
+  columns: TemplateColumnCheck[]
+  summary: string
+}
+
 export interface DiffReport {
   success: boolean
+  mode: 'template' | 'ground_truth'
   outputFilename: string
   benchmarkFilename: string
   outputRowCount: number
@@ -145,6 +203,7 @@ export interface DiffReport {
   columnStats: ColumnDiffStat[]
   overallMatchRate: number // 0 - 100
   summaryText: string
+  templateChecks?: TemplateCheckResult
   error?: string
 }
 

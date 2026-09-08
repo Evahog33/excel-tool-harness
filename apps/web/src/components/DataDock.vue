@@ -107,7 +107,7 @@
       </div>
     </div>
 
-    <!-- 预期标杆 Excel 挂载区 (Ground Truth) -->
+    <!-- 样表/标杆 Excel 挂载区 (Template Blueprint vs Ground Truth Benchmark) -->
     <div class="dock-benchmark-section">
       <input
         ref="benchmarkInputRef"
@@ -116,33 +116,50 @@
         class="file-input-hidden"
         @change="handleBenchmarkSelect"
       />
-      <!-- 未上传标杆 -->
+      <!-- 未上传样表/标杆 -->
       <div v-if="!store.benchmarkFile" class="benchmark-bar-empty">
         <div class="benchmark-hint-left">
           <span class="benchmark-icon">🎯</span>
-          <span class="benchmark-label">预期结果标杆 (选填)：</span>
-          <span class="benchmark-desc">上传标准结果样本，AI 将严格按其列结构与口径生成工具，并在沙箱提供秒级对账验收</span>
+          <span class="benchmark-label">样表 / 标杆 (选填)：</span>
+          <span class="benchmark-desc">支持上传目标格式模板（空表头/样表）或真实结果标杆，AI 将严格按其结构输出并在产物提供自适应契约核验</span>
         </div>
         <button class="btn-upload-benchmark" :disabled="store.isUploadingBenchmark" @click="triggerBenchmarkInput">
-          {{ store.isUploadingBenchmark ? '⏳ 解析标杆中…' : '＋ 上传标杆 Excel 验证' }}
+          {{ store.isUploadingBenchmark ? '⏳ 解析中…' : '＋ 上传样表 / 标杆' }}
         </button>
       </div>
-      <!-- 已挂载标杆 -->
-      <div v-else class="benchmark-card">
+      <!-- 已挂载样表/标杆 -->
+      <div
+        v-else
+        class="benchmark-card"
+        :class="store.benchmarkFile.benchmarkRole === 'template' ? 'card--template' : 'card--ground_truth'"
+      >
         <div class="benchmark-card-left">
-          <div class="benchmark-badge">🎯 预期标杆样本</div>
+          <div
+            class="benchmark-badge"
+            :class="store.benchmarkFile.benchmarkRole === 'template' ? 'badge--template' : 'badge--ground_truth'"
+          >
+            {{ store.benchmarkFile.benchmarkRole === 'template' ? '📋 目标模板 (格式样表)' : '🎯 真实标杆 (数值对账)' }}
+          </div>
           <div class="benchmark-info">
             <span class="benchmark-name" :title="store.benchmarkFile.filename">{{ store.benchmarkFile.filename }}</span>
             <span class="benchmark-meta">
-              {{ store.benchmarkFile.columnCount }} 列结构 · 约 {{ store.benchmarkFile.rowCount }} 行标准数据 (仅作验收对账，不作为输入源)
+              {{ store.benchmarkFile.columnCount }} 列结构 · 约 {{ store.benchmarkFile.rowCount }} 行数据
+              {{ store.benchmarkFile.benchmarkRole === 'template' ? '(严格约束输出表头与顺序)' : '(精确逐行逐单元格数值对账)' }}
             </span>
           </div>
         </div>
         <div class="benchmark-card-actions">
-          <button class="benchmark-action-btn" title="重新上传替换标杆" @click="triggerBenchmarkInput">
-            🔄 替换标杆
+          <button
+            class="benchmark-action-btn btn-toggle-role"
+            :title="store.benchmarkFile.benchmarkRole === 'template' ? '切换为真实标杆模式进行数值对账' : '切换为模板模式仅核验格式与表头'"
+            @click="handleToggleBenchmarkRole"
+          >
+            {{ store.benchmarkFile.benchmarkRole === 'template' ? '⇄ 转为标杆对账' : '⇄ 转为模板模式' }}
           </button>
-          <button class="benchmark-action-btn btn-remove" title="移除此标杆文件" @click="handleRemoveBenchmark">
+          <button class="benchmark-action-btn" title="重新上传替换" @click="triggerBenchmarkInput">
+            🔄 替换
+          </button>
+          <button class="benchmark-action-btn btn-remove" title="移除此参考文件" @click="handleRemoveBenchmark">
             ✕ 移除
           </button>
         </div>
@@ -229,6 +246,17 @@ async function handleBenchmarkSelect(e: Event) {
 async function handleRemoveBenchmark() {
   if (confirm(`确认移除标杆文件「${store.benchmarkFile?.filename}」吗？`)) {
     await store.removeBenchmark()
+  }
+}
+
+async function handleToggleBenchmarkRole() {
+  if (!store.benchmarkFile) return
+  const currentRole = store.benchmarkFile.benchmarkRole || 'template'
+  const newRole = currentRole === 'template' ? 'ground_truth' : 'template'
+  try {
+    await store.setBenchmarkRole(newRole)
+  } catch (err: any) {
+    alert(`切换模式失败: ${err.message}`)
   }
 }
 
@@ -725,9 +753,18 @@ const generatedPromptText = computed(() => {
   align-items: center;
   justify-content: space-between;
   padding: 8px 14px;
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+
+.benchmark-card.card--template {
+  background: #f0f9ff;
+  border: 1px solid #7dd3fc;
+}
+
+.benchmark-card.card--ground_truth {
   background: #faf5ff;
   border: 1px solid #d8b4fe;
-  border-radius: 8px;
 }
 
 .benchmark-card-left {
@@ -739,10 +776,19 @@ const generatedPromptText = computed(() => {
 .benchmark-badge {
   font-size: 11px;
   font-weight: 700;
-  background: #ede9fe;
-  color: #6d28d9;
   padding: 3px 8px;
   border-radius: 6px;
+}
+
+.benchmark-badge.badge--template {
+  background: #e0f2fe;
+  color: #0369a1;
+  border: 1px solid #bae6fd;
+}
+
+.benchmark-badge.badge--ground_truth {
+  background: #ede9fe;
+  color: #6d28d9;
   border: 1px solid #ddd6fe;
 }
 
@@ -752,15 +798,29 @@ const generatedPromptText = computed(() => {
   gap: 2px;
 }
 
+.card--template .benchmark-name {
+  color: #0369a1;
+}
+
+.card--template .benchmark-meta {
+  color: #0284c7;
+}
+
+.card--ground_truth .benchmark-name {
+  color: #4c1d95;
+}
+
+.card--ground_truth .benchmark-meta {
+  color: #7c3aed;
+}
+
 .benchmark-name {
   font-size: 13px;
   font-weight: 600;
-  color: #4c1d95;
 }
 
 .benchmark-meta {
   font-size: 11px;
-  color: #7c3aed;
 }
 
 .benchmark-card-actions {

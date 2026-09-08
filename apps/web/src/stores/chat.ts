@@ -53,6 +53,9 @@ export const useChatStore = defineStore('chat', () => {
   const isUploadingBenchmark = ref(false)
   const isComparingBenchmark = ref(false)
   const diffReport = ref<DiffReport | null>(null)
+  const isOutputPreviewOpen = ref(false)
+  const currentPreviewFile = ref<OutputFileMeta | null>(null)
+  const isLoadingPreview = ref(false)
 
 
   const currentSession = computed(() =>
@@ -252,8 +255,22 @@ export const useChatStore = defineStore('chat', () => {
     return data
   }
 
-  /** 执行产物与标杆对比 (Diff 对账) */
-  async function compareBenchmark(outputFilepath?: string): Promise<DiffReport | undefined> {
+  /** 切换样表/标杆文件的角色模式 (template 模板 vs ground_truth 标杆) */
+  async function setBenchmarkRole(role: 'template' | 'ground_truth') {
+    if (!currentSessionId.value) return
+    const { data } = await axios.post(`/api/sessions/${currentSessionId.value}/benchmark-role`, { role })
+    if (data.ok && data.benchmarkFile) {
+      benchmarkFile.value = data.benchmarkFile
+      const session = sessions.value.find((s) => s.id === currentSessionId.value)
+      if (session) {
+        session.benchmarkFile = data.benchmarkFile
+      }
+    }
+    return data
+  }
+
+  /** 执行产物与样表/标杆对比 (契约核验 或 Diff 对账) */
+  async function compareBenchmark(outputFilepath?: string, mode?: 'template' | 'ground_truth'): Promise<DiffReport | undefined> {
     if (!currentSessionId.value) return
     let targetPath = outputFilepath
     if (!targetPath) {
@@ -268,9 +285,11 @@ export const useChatStore = defineStore('chat', () => {
 
     isComparingBenchmark.value = true
     try {
+      const payload: any = { outputFilepath: targetPath }
+      if (mode) payload.mode = mode
       const { data } = await axios.post(
         `/api/sessions/${currentSessionId.value}/compare-benchmark`,
-        { outputFilepath: targetPath },
+        payload,
       )
       if (data.ok) {
         diffReport.value = data.diff
@@ -487,6 +506,36 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  /** 打开产物预览弹窗 */
+  async function openOutputPreview(file?: OutputFileMeta) {
+    const targetFile = file || runResult.value?.outputFiles?.[0] || null
+    if (!targetFile) return
+    currentPreviewFile.value = targetFile
+    isOutputPreviewOpen.value = true
+
+    // 若产物未内嵌 preview 数据，主动向后端请求嗅探
+    if (!targetFile.preview && targetFile.filepath) {
+      try {
+        isLoadingPreview.value = true
+        const { data } = await axios.get('/api/excel/preview', {
+          params: { filepath: targetFile.filepath },
+        })
+        if (data.ok && data.preview) {
+          targetFile.preview = data.preview
+        }
+      } catch (e) {
+        console.error('获取产物预览数据失败:', e)
+      } finally {
+        isLoadingPreview.value = false
+      }
+    }
+  }
+
+  /** 关闭产物预览弹窗 */
+  function closeOutputPreview() {
+    isOutputPreviewOpen.value = false
+  }
+
   return {
     sessions,
     currentSessionId,
@@ -505,6 +554,11 @@ export const useChatStore = defineStore('chat', () => {
     isUploadingBenchmark,
     isComparingBenchmark,
     diffReport,
+    isOutputPreviewOpen,
+    currentPreviewFile,
+    isLoadingPreview,
+    openOutputPreview,
+    closeOutputPreview,
     loadSessions,
     createSession,
     deleteSession,
@@ -514,6 +568,7 @@ export const useChatStore = defineStore('chat', () => {
     removeExcelFile,
     removeExcel,
     uploadBenchmark,
+    setBenchmarkRole,
     removeBenchmark,
     compareBenchmark,
     clearDiffReport,
